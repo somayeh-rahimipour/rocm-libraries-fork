@@ -64,6 +64,7 @@
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelDynamicPass.hpp"
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelStaticPass.hpp"
 #include "stinkytofu/transforms/asm/TDMLoadWaveSyncPass.hpp"
+#include "stinkytofu/transforms/asm/WaitAwareScheduleRepairPass.hpp"
 
 using namespace stinkytofu;
 
@@ -120,6 +121,8 @@ const std::vector<PassInfo> availablePasses = {
      [](const std::vector<std::string>& args) {
          return createGfx1250HazardPass(hasPassArg(args, "profile"));
      }},
+    {"WaitAwareScheduleRepairPass",
+     [](const auto&) { return createWaitAwareScheduleRepairPass(); }},
     // BuildUseDefChainPass accepts:
     //   includePseudo    — also build chains for pseudo registers (memtokens)
     //   noClearExisting  — keep any existing PHIs/chains
