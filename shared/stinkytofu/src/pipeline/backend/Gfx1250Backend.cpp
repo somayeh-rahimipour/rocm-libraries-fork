@@ -66,6 +66,7 @@
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelDynamicPass.hpp"
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelStaticPass.hpp"
 #include "stinkytofu/transforms/asm/TDMLoadWaveSyncPass.hpp"
+#include "stinkytofu/transforms/asm/WaitAwareScheduleRepairPass.hpp"
 
 namespace stinkytofu {
 namespace {
@@ -182,6 +183,11 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 innerPM.addPass(createStinkyWaitCntInsertionPass(waitCntOptions));
                 if (runScheduler) innerPM.addPass(createRemoveDscntPass());
             }
+
+            if (runScheduler && moduleOptions.EnableWaitAwareScheduleRepair) {
+                innerPM.addPass(createWaitAwareScheduleRepairPass());
+            }
+
             pm.addPass(createKernelToRegionsPassAdaptor(
                 module, {"loopWithPrefetch", "noLoadLoopBody"}, std::move(innerPM)));
         }
