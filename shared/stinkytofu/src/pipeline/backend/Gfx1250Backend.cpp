@@ -184,8 +184,9 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 if (runScheduler) innerPM.addPass(createRemoveDscntPass());
             }
 
-            if (runScheduler && moduleOptions.EnableWaitAwareScheduleRepair) {
-                innerPM.addPass(createWaitAwareScheduleRepairPass());
+            if (runScheduler && moduleOptions.WaitRepairSlotsAfterAnchor > 0) {
+                innerPM.addPass(
+                    createWaitAwareScheduleRepairPass(moduleOptions.WaitRepairSlotsAfterAnchor));
             }
 
             pm.addPass(createKernelToRegionsPassAdaptor(
