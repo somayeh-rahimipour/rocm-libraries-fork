@@ -44,6 +44,8 @@ subtrees:
     title: Insert cluster barrier pass
   - file: developer/wmma-vgpr-reorder-pass.md
     title: WMMA VGPR reorder pass
+  - file: developer/lift-asm-registers-to-ssa-pass.md
+    title: Lift Asm registers to SSA pass
 
 - caption: Reference
   entries:
