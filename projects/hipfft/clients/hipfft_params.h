@@ -258,12 +258,8 @@ public:
                                          "vram-probing purposes, error code: "
                                          + std::to_string(plan_status) + ")");
             }
-            std::vector<size_t> required_worksizes(temp_copy.get_num_used_gpus());
-            required_worksizes[0] = absurd_init_worksize_estimate;
-            // replace the above by
-            //std::vector<size_t> required_worksizes(temp_copy.get_num_used_gpus(),
-            //                                       absurd_init_worksize_estimate);
-            // when hipFFT's mGPU workspace size query is fixed for multi-GPU
+            std::vector<size_t> required_worksizes(temp_copy.get_num_used_gpus(),
+                                                   absurd_init_worksize_estimate);
             auto get_size_ret = hipfftGetSize(temp_copy.plan, required_worksizes.data());
             if(get_size_ret != HIPFFT_SUCCESS)
             {
@@ -1131,13 +1127,7 @@ private:
         }
         if(get_num_used_gpus() > 1)
         {
-            // TODO: enable below once hipfftXtSetWorkArea is enabled
-#if 0
-            ret = hipfftXtSetWorkArea(plan, workareas.data);
-#else
-            throw unimplemented_exception(
-                "No implementation support for externally-managed work areas with multi-gpu usage");
-#endif
+            ret = hipfftXtSetWorkArea(plan, workareas.data());
         }
         else
         {

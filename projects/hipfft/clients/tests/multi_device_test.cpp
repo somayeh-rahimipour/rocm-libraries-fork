@@ -57,9 +57,7 @@ enum SplitType
     PENCIL_3D,
 };
 
-std::vector<fft_params> param_generator_multi_gpu(const std::optional<SplitType> type,
-                                                  fft_auto_allocation            auto_alloc_setting
-                                                  = fft_auto_allocation_default)
+std::vector<fft_params> param_generator_multi_gpu(std::optional<SplitType> type = std::nullopt)
 {
     if(mp_lib == fft_params::fft_mp_lib_none && mp_ranks != 1)
         throw std::runtime_error("Unexpected value of mp_ranks (" + std::to_string(mp_ranks)
@@ -97,7 +95,7 @@ std::vector<fft_params> param_generator_multi_gpu(const std::optional<SplitType>
                                          place_range,
                                          false,
                                          multi_device_callbacks,
-                                         auto_alloc_setting);
+                                         {fft_auto_allocation_default, fft_auto_allocation_off});
 
     std::vector<fft_params> all_params;
 
@@ -232,14 +230,5 @@ INSTANTIATE_TEST_SUITE_P(multi_gpu_3d_pencils,
 // library-decided splits
 INSTANTIATE_TEST_SUITE_P(multi_gpu,
                          accuracy_test,
-                         ::testing::ValuesIn(param_generator_multi_gpu({})),
-                         accuracy_test::TestName);
-
-// Note: disabled for now due to lack of implementation in hipFFT
-// with rocfft backend (multi-device workspace assignment is not
-// implemented yet)
-INSTANTIATE_TEST_SUITE_P(DISABLED_various_multi_gpu,
-                         accuracy_test,
-                         ::testing::ValuesIn(param_generator_multi_gpu({},
-                                                                       fft_auto_allocation_off)),
+                         ::testing::ValuesIn(param_generator_multi_gpu()),
                          accuracy_test::TestName);

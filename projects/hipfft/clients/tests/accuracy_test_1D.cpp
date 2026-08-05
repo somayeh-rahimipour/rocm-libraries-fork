@@ -528,5 +528,5 @@ INSTANTIATE_TEST_SUITE_P(
                                         place_range,
                                         false,
                                         callbacks_none,
-                                        fft_auto_allocation_off)),
+                                        {fft_auto_allocation_off})),
     accuracy_test::TestName);
