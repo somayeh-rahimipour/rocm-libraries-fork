@@ -25,42 +25,19 @@
 #include <map>
 #include <numeric>
 #include <optional>
-
-#include "../shared/client_except.h"
-#include "../shared/concurrency.h"
-#include "../shared/fft_params.h"
-#include "../shared/hip_object_wrapper.h"
-#include "hipfft/hipfft.h"
-#include "hipfft/hipfftXt.h"
 #include <random>
 
+#include "hipfft/hipfft.h"
+#include "hipfft/hipfftXt.h"
 #ifdef HIPFFT_MPI_ENABLE
 #include "hipfft/hipfftMp.h"
 #include <mpi.h>
 #endif
-// plan handles are pointers for rocFFT backend, and ints for cuFFT
-#ifdef __HIP_PLATFORM_AMD__
-static constexpr hipfftHandle INVALID_HIPFFT_PLAN_HANDLE = nullptr;
-#else
-static constexpr hipfftHandle INVALID_HIPFFT_PLAN_HANDLE = -1;
-#endif
 
-// hipfftXtMalloc takes (plan, &desc, format) but hip_object_wrapper_t expects TCreate(&obj, ...).
-// This adapter reorders the arguments to match.
-inline hipfftResult
-    hipfftXtMalloc_adapted(hipLibXtDesc** desc, hipfftHandle plan, hipfftXtSubFormat fmt)
-{
-    return hipfftXtMalloc(plan, desc, fmt);
-}
-// RAII wrappers for hipFFT handles and Xt descriptors
-typedef hip_object_wrapper_t<hipfftHandle,
-                             hipfftCreate,
-                             hipfftDestroy,
-                             HIPFFT_SUCCESS,
-                             INVALID_HIPFFT_PLAN_HANDLE>
-    hipfftHandle_wrapper_t;
-typedef hip_object_wrapper_t<hipLibXtDesc*, hipfftXtMalloc_adapted, hipfftXtFree, HIPFFT_SUCCESS>
-    hipfftLibXtDesc_wrapper_t;
+#include "../shared/client_except.h"
+#include "../shared/concurrency.h"
+#include "../shared/fft_params.h"
+#include "../shared/hipfft_object_wrapper.h"
 
 inline fft_status fft_status_from_hipfftparams(const hipfftResult_t val)
 {

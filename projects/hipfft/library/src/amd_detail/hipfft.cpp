@@ -23,6 +23,7 @@
 #ifdef HIPFFT_MPI_ENABLE
 #include "hipfft/hipfftMp.h"
 #endif
+#include "../../../shared/hipfft_object_wrapper.h"
 #include "rocfft/rocfft.h"
 #include "rocfft_wrapper.h"
 #include <algorithm>
@@ -1555,45 +1556,18 @@ catch(...)
 }
 
 hipfftResult hipfftEstimate1d(int nx, hipfftType type, int batch, size_t* workSize)
-try
 {
-    if(!workSize)
-        return HIPFFT_INVALID_VALUE;
-    hipfftHandle plan = nullptr;
-    hipfftResult ret  = hipfftGetSize1d(plan, nx, type, batch, workSize);
-    return ret;
-}
-catch(...)
-{
-    return handle_exception();
+    return hipfftGetSize1d(nullptr, nx, type, batch, workSize);
 }
 
 hipfftResult hipfftEstimate2d(int nx, int ny, hipfftType type, size_t* workSize)
-try
 {
-    if(!workSize)
-        return HIPFFT_INVALID_VALUE;
-    hipfftHandle plan = nullptr;
-    hipfftResult ret  = hipfftGetSize2d(plan, nx, ny, type, workSize);
-    return ret;
-}
-catch(...)
-{
-    return handle_exception();
+    return hipfftGetSize2d(nullptr, nx, ny, type, workSize);
 }
 
 hipfftResult hipfftEstimate3d(int nx, int ny, int nz, hipfftType type, size_t* workSize)
-try
 {
-    if(!workSize)
-        return HIPFFT_INVALID_VALUE;
-    hipfftHandle plan = nullptr;
-    hipfftResult ret  = hipfftGetSize3d(plan, nx, ny, nz, type, workSize);
-    return ret;
-}
-catch(...)
-{
-    return handle_exception();
+    return hipfftGetSize3d(nullptr, nx, ny, nz, type, workSize);
 }
 
 hipfftResult hipfftEstimateMany(int        rank,
@@ -1607,18 +1581,9 @@ hipfftResult hipfftEstimateMany(int        rank,
                                 hipfftType type,
                                 int        batch,
                                 size_t*    workSize)
-try
 {
-    if(!workSize)
-        return HIPFFT_INVALID_VALUE;
-    hipfftHandle plan = nullptr;
-    hipfftResult ret  = hipfftGetSizeMany(
-        plan, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize);
-    return ret;
-}
-catch(...)
-{
-    return handle_exception();
+    return hipfftGetSizeMany(
+        nullptr, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize);
 }
 
 hipfftResult
@@ -1627,16 +1592,15 @@ try
 {
     if(!workSize)
         return HIPFFT_INVALID_VALUE;
-    if(nx < 0 || batch < 0)
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
     {
-        return HIPFFT_INVALID_SIZE;
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
     }
-
-    hipfftHandle p;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
-    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan1d(p, nx, type, batch, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+    (*temp).auto_allocate = false;
+    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan1d(temp, nx, type, batch, workSize));
 
     return HIPFFT_SUCCESS;
 }
@@ -1650,16 +1614,16 @@ try
 {
     if(!workSize)
         return HIPFFT_INVALID_VALUE;
-    if(nx < 0 || ny < 0)
-    {
-        return HIPFFT_INVALID_SIZE;
-    }
 
-    hipfftHandle p;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
-    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan2d(p, nx, ny, type, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
+    {
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
+    }
+    (*temp).auto_allocate = false;
+    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan2d(temp, nx, ny, type, workSize));
 
     return HIPFFT_SUCCESS;
 }
@@ -1674,16 +1638,16 @@ try
 {
     if(!workSize)
         return HIPFFT_INVALID_VALUE;
-    if(nx < 0 || ny < 0 || nz < 0)
-    {
-        return HIPFFT_INVALID_SIZE;
-    }
 
-    hipfftHandle p;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
-    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan3d(p, nx, ny, nz, type, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
+    {
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
+    }
+    (*temp).auto_allocate = false;
+    HIPFFT_EXPECT_SUCCESS(hipfftMakePlan3d(temp, nx, ny, nz, type, workSize));
 
     return HIPFFT_SUCCESS;
 }
@@ -1708,12 +1672,17 @@ try
 {
     if(!workSize)
         return HIPFFT_INVALID_VALUE;
-    hipfftHandle p = nullptr;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
+
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
+    {
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
+    }
+    (*temp).auto_allocate = false;
     HIPFFT_EXPECT_SUCCESS(hipfftMakePlanMany(
-        p, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+        temp, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize));
 
     return HIPFFT_SUCCESS;
 }
@@ -1738,12 +1707,16 @@ try
 {
     if(!workSize)
         return HIPFFT_INVALID_VALUE;
-    hipfftHandle p = nullptr;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
+    {
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
+    }
+    (*temp).auto_allocate = false;
     HIPFFT_EXPECT_SUCCESS(hipfftMakePlanMany64(
-        p, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+        temp, rank, n, inembed, istride, idist, onembed, ostride, odist, type, batch, workSize));
 
     return HIPFFT_SUCCESS;
 }
@@ -2222,16 +2195,22 @@ hipfftResult hipfftXtGetSizeMany(hipfftHandle   plan,
                                  hipDataType    executiontype)
 try
 {
+    if(!workSize)
+        return HIPFFT_INVALID_VALUE;
     hipfftIOType iotype;
     HIPFFT_EXPECT_SUCCESS(iotype.init(inputtype, outputtype, executiontype));
 
-    hipfftHandle p;
-    HIPFFT_EXPECT_SUCCESS(hipfftCreate(&p));
-    p->auto_allocate = false;
+    hipfftHandle_wrapper_t temp;
+    HIPFFT_EXPECT_SUCCESS(temp.alloc_with_err());
+    if(plan)
+    {
+        for(const auto& ctx : plan->device_contexts)
+            (*temp).device_contexts.emplace_back(ctx.device_id);
+    }
+    (*temp).auto_allocate = false;
 
     HIPFFT_EXPECT_SUCCESS(hipfftMakePlanMany_internal(
-        p, rank, n, inembed, istride, idist, onembed, ostride, odist, iotype, batch, workSize));
-    HIPFFT_EXPECT_SUCCESS(hipfftDestroy(p));
+        temp, rank, n, inembed, istride, idist, onembed, ostride, odist, iotype, batch, workSize));
     return HIPFFT_SUCCESS;
 }
 catch(...)
