@@ -994,6 +994,8 @@ struct hipfftHandle_t
     }
 };
 
+#include <iostream>
+
 static inline hipfftResult handle_exception() noexcept
 try
 {
@@ -1001,18 +1003,22 @@ try
 }
 catch(hipfftResult e)
 {
+    std::cout << "hipFFT raw error code: " << e << std::endl;
     return e;
 }
 catch(const DEVICEBUF_MEM_USAGE& e)
 {
+    std::cout << "DEVICEBUF_MEM_USAGE: " << e.what() << std::endl;
     return HIPFFT_ALLOC_FAILED;
 }
 catch(const std::exception& e)
 {
+    std::cout << "std::exception: " << e.what() << std::endl;
     return HIPFFT_INTERNAL_ERROR;
 }
 catch(...)
 {
+    std::cout << "Unknown exception" << std::endl;
     return HIPFFT_INTERNAL_ERROR;
 }
 
