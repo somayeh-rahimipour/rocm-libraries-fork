@@ -5,6 +5,10 @@ Documentation for hipFFT is available at
 
 ## Since last release (ROCm 7.14)
 
+### Added
+
+* `hipfftXtSetWorkArea` API for setting work areas on multi-device plans.
+
 ### Changed
 
 * Modified the rocFFT backend's implementation details of hipFFT so that cuFFT backend's

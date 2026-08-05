@@ -1780,24 +1780,36 @@ catch(...)
 hipfftResult hipfftSetWorkArea(hipfftHandle plan, void* workArea)
 try
 {
-    if(!plan || !plan->initialized() || plan->device_contexts.empty())
+    if(!plan || !plan->initialized() || plan->device_contexts.size() != 1)
         return HIPFFT_INVALID_PLAN;
-    if(plan->device_contexts.size() > 1)
-    {
-        // wrong API for multi-device usage, hipfftXtSetWorkArea (yet to
-        // be implemented) must be used for multi-device plans
-        return HIPFFT_INVALID_PLAN;
-    }
+    // work delegated to generalized version to avoid duplications
+    return hipfftXtSetWorkArea(plan, &workArea);
+}
+catch(...)
+{
+    return handle_exception();
+}
 
-    auto& dev_info = plan->device_contexts[0];
-    if(dev_info.work_buffer_byte_bsize == 0)
-        return HIPFFT_SUCCESS;
+hipfftResult hipfftXtSetWorkArea(hipfftHandle plan, void** workArea)
+try
+{
+    if(!plan || !plan->initialized())
+        return HIPFFT_INVALID_PLAN;
     if(!workArea)
         return HIPFFT_INVALID_VALUE;
-
-    dev_info.work_buffer = gpubuf::make_nonowned(workArea, dev_info.work_buffer_byte_bsize);
-    ROCFFT_EXPECT_SUCCESS(rocfft_execution_info_set_work_buffer(
-        plan->info, dev_info.work_buffer.data(), dev_info.work_buffer_byte_bsize));
+    for(size_t idx = 0; idx < plan->device_contexts.size(); ++idx)
+    {
+        auto& dev_info = plan->device_contexts[idx];
+        if(dev_info.work_buffer_byte_bsize == 0)
+            continue;
+        if(!workArea[idx])
+            return HIPFFT_INVALID_VALUE;
+        rocfft_scoped_device dev(dev_info.device_id);
+        dev_info.work_buffer
+            = gpubuf::make_nonowned(workArea[idx], dev_info.work_buffer_byte_bsize);
+        ROCFFT_EXPECT_SUCCESS(rocfft_execution_info_set_work_buffer(
+            plan->info, dev_info.work_buffer.data(), dev_info.work_buffer_byte_bsize));
+    }
     plan->auto_allocate = false;
     return HIPFFT_SUCCESS;
 }
