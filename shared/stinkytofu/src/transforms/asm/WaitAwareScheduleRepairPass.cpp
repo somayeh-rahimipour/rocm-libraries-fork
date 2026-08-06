@@ -72,8 +72,7 @@ WaitCountSpec mergeWaitSpecs(const WaitCountSpec& a, const WaitCountSpec& b) {
     return out;
 }
 
-WaitAnchorMap discoverWaitAnchors(const std::vector<StinkyInstruction*>& seq) {
-    WaitAnchorMap anchors;
+void discoverWaitAnchorsInRun(const std::vector<StinkyInstruction*>& seq, WaitAnchorMap& anchors) {
     for (size_t i = 0; i < seq.size(); ++i) {
         if (!isAnyWaitCnt(*seq[i])) continue;
 
@@ -97,6 +96,25 @@ WaitAnchorMap discoverWaitAnchors(const std::vector<StinkyInstruction*>& seq) {
         anchors[info.anchor] = std::move(info);
         i = waitEnd;
     }
+}
+
+/// Discover wait anchors per run of consecutive StinkyTofu instructions.
+/// Runs are split exactly where repairBlock() splits segments, so a wait group
+/// can never be anchored to a WMMA that the rewrite places past a boundary.
+WaitAnchorMap discoverWaitAnchors(BasicBlock& bb) {
+    WaitAnchorMap anchors;
+    std::vector<StinkyInstruction*> run;
+    run.reserve(bb.size());
+
+    for (IRBase& ir : bb) {
+        if (ir.getType() != IRBase::IRType::StinkyTofu) {
+            discoverWaitAnchorsInRun(run, anchors);
+            run.clear();
+            continue;
+        }
+        run.push_back(cast<StinkyInstruction>(&ir));
+    }
+    discoverWaitAnchorsInRun(run, anchors);
     return anchors;
 }
 
@@ -145,15 +163,7 @@ void emitInstWithWaits(std::vector<IRBase*>& output, StinkyInstruction* inst,
 }
 
 void repairBlock(BasicBlock& bb, const PassContext& passCtx, unsigned slotsToMovePastAnchor) {
-    std::vector<StinkyInstruction*> seq;
-    seq.reserve(bb.size());
-    for (IRBase& ir : bb) {
-        if (ir.getType() != IRBase::IRType::StinkyTofu) continue;
-        seq.push_back(cast<StinkyInstruction>(&ir));
-    }
-    if (seq.empty()) return;
-
-    const WaitAnchorMap anchors = discoverWaitAnchors(seq);
+    const WaitAnchorMap anchors = discoverWaitAnchors(bb);
     // Without a wait-anchored WMMA there is nothing for this pass to repair.
     if (anchors.empty()) return;
 
@@ -163,7 +173,7 @@ void repairBlock(BasicBlock& bb, const PassContext& passCtx, unsigned slotsToMov
     output.reserve(bb.size());
 
     std::vector<StinkyInstruction*> segment;
-    segment.reserve(seq.size());
+    segment.reserve(bb.size());
 
     auto flushSegment = [&]() {
         if (segment.empty()) return;
