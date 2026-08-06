@@ -32,6 +32,18 @@
 
 #include <hip/hip_runtime.h>
 
+// Compile-time guards: internal structs must fit inside the public opaque buffers.
+static_assert(sizeof(_rocsparselt_handle) <= sizeof(rocsparselt_handle),
+              "rocsparselt_handle buffer too small for _rocsparselt_handle");
+static_assert(sizeof(_rocsparselt_mat_descr) <= sizeof(rocsparselt_mat_descr),
+              "rocsparselt_mat_descr buffer too small for _rocsparselt_mat_descr");
+static_assert(sizeof(_rocsparselt_matmul_descr) <= sizeof(rocsparselt_matmul_descr),
+              "rocsparselt_matmul_descr buffer too small for _rocsparselt_matmul_descr");
+static_assert(sizeof(_rocsparselt_matmul_alg_selection) <= sizeof(rocsparselt_matmul_alg_selection),
+              "rocsparselt_matmul_alg_selection buffer too small");
+static_assert(sizeof(_rocsparselt_matmul_plan) <= sizeof(rocsparselt_matmul_plan),
+              "rocsparselt_matmul_plan buffer too small for _rocsparselt_matmul_plan");
+
 ROCSPARSELT_KERNEL void init_kernel(){};
 
 void _rocsparselt_handle::init()
@@ -92,6 +104,7 @@ void _rocsparselt_handle::init()
     THROW_IF_HIP_ERROR(hipGetDevice(&device));
     log_trace(this, "handle::init", "hipGetDevice");
 
+    hipDeviceProp_t properties;
     THROW_IF_HIP_ERROR(hipGetDeviceProperties(&properties, device));
     log_trace(this, "handle::init", "hipGetDeviceProperties", device);
 
@@ -113,13 +126,20 @@ void _rocsparselt_handle::init()
     has_fp8_fnuz = gpu_arch_match(rocsparselt_internal_get_arch_name(properties), "942");
 #endif
 
-    is_init = (uintptr_t)(this);
+    is_init = IMPL_MAGIC;
+    ownership = (uintptr_t)(&ownership); // self-referential: marks this as original
 }
 
 void _rocsparselt_handle::destroy()
 {
-    is_init = 0;
-    // Close log files
+    // Detect original vs byte-copied sibling (same pattern as alg_selection).
+    const bool is_original = (ownership == (uintptr_t)(&ownership));
+    is_init   = 0;
+    // Zero ownership: copies reading through their stored address see 0 → become invalid.
+    ownership = 0;
+    if(!is_original)
+        return; // copy: log streams are owned by original, do not free here
+    // original: free all resources
     if(log_trace_ofs)
     {
         if(log_trace_ofs->is_open())
@@ -154,10 +174,18 @@ std::ostream& operator<<(std::ostream& stream, const _rocsparselt_matmul_descr& 
 {
     stream << "{"
            << "ptr=" << (&t) << ", opA=" << rocsparselt_operation_to_string(t.op_A)
-           << ", opB=" << rocsparselt_operation_to_string(t.op_B) << ", matA=" << *(t.matrix_A)
-           << ", matB=" << *(t.matrix_B) << ", matC=" << *(t.matrix_C);
+           << ", opB=" << rocsparselt_operation_to_string(t.op_B);
+    stream << ", matA=";
+    operator<<(stream, *t.matrix_A);
+    stream << ", matB=";
+    operator<<(stream, *t.matrix_B);
+    stream << ", matC=";
+    operator<<(stream, *t.matrix_C);
     if(t.matrix_C != t.matrix_D)
-        stream << ", matD=" << *(t.matrix_D);
+    {
+        stream << ", matD=";
+        operator<<(stream, *t.matrix_D);
+    }
     stream << ", computeType=" << rocsparselt_compute_type_to_string(t.compute_type)
            << ", activation=" << rocsparselt_activation_type_to_string(t.activation)
            << ", activation_relu_upperbound=" << t.activation_relu_upperbound
@@ -167,12 +195,15 @@ std::ostream& operator<<(std::ostream& stream, const _rocsparselt_matmul_descr& 
            << ", activation_tanh_beta=" << t.activation_tanh_beta
            << ", activation_gelu_scaling=" << t.activation_gelu_scaling
            << ", bias_pointer=" << t.bias_pointer << ", bias_stride=" << t.bias_stride
-           << ", bias_type=" << hip_datatype_to_string(t.bias_type) 
+           << ", bias_type=" << hip_datatype_to_string(t.bias_type)
            << ", gate_pointer=" << t.gate_residual_mat_pointer;
     if(t.gate_residual_desc != nullptr)
-        stream << ", gate="  << *(t.gate_residual_desc);
-    stream << ", m=" << t.m << ", n=" << t.n
-           << ", k=" << t.k << ", is_sparse_a=" << t.is_sparse_a << "}";
+    {
+        stream << ", gate=";
+        operator<<(stream, *t.gate_residual_desc);
+    }
+    stream << ", m=" << t.m << ", n=" << t.n << ", k=" << t.k << ", is_sparse_a=" << t.is_sparse_a
+           << "}";
     return stream;
 }
 
@@ -188,48 +219,117 @@ std::ostream& operator<<(std::ostream& stream, const _rocsparselt_matmul_alg_sel
 std::ostream& operator<<(std::ostream& stream, const _rocsparselt_matmul_plan& t)
 {
     stream << "{"
-           << "ptr=" << (&t) << ", matmul=" << *(t.matmul_descr)
-           << ", alg_selection=" << *(t.alg_selection) << "}";
+           << "ptr=" << (&t);
+    if(t.matmul_descr != nullptr)
+    {
+        stream << ", matmul=";
+        operator<<(stream, *t.matmul_descr);
+    }
+    else
+        stream << ", matmul=null";
+    if(t.alg_selection != nullptr)
+    {
+        stream << ", alg_selection=";
+        operator<<(stream, *t.alg_selection);
+    }
+    else
+        stream << ", alg_selection=null";
+    stream << "}";
     return stream;
+}
+
+// Token scheme: is_init stores the address of its own field (&is_init).
+// On struct copy (b = a), b.is_init holds a's field address.
+// Checking *((uintptr_t*)x.is_init) == x.is_init verifies the original is still alive:
+//   - if alive:    *ptr == x.is_init (original's field still holds that address)
+//   - if destroyed: *ptr == 0        (destroy() sets the original's is_init to 0)
+// This allows struct copy (b = a) to be valid while ensuring that destroying either
+// copy invalidates all siblings.
+
+// Safety guard before dereferencing is_init as a pointer.
+// For a properly initialized struct (original or byte-copied sibling):
+//   is_init = address of a uintptr_t field on the stack/heap → aligned, in user space.
+// For uninitialized garbage:
+//   is_init may be misaligned, out of user-space range, or 0 → caught here → no SIGSEGV.
+static bool is_safe_to_deref(uintptr_t is_init)
+{
+    // Null is handled by callers but guard here too.
+    if(is_init == 0)
+        return false;
+    // Must be naturally aligned for uintptr_t to be a valid field address.
+    if(is_init & (alignof(uintptr_t) - 1))
+        return false;
+    // On Linux x86-64, user-space addresses are below 2^47 (~128 TiB).
+    // Garbage values in kernel range or beyond are not valid struct field addresses.
+    constexpr uintptr_t MAX_USER_ADDR = 0x0000800000000000ULL;
+    return is_init < MAX_USER_ADDR;
 }
 
 bool check_is_init_handle(const _rocsparselt_handle* handle)
 {
-    return handle != nullptr && handle->is_init != 0 && handle->is_init == (uintptr_t)handle;
+    // Layer 1: IMPL_MAGIC — direct comparison, no dereference, zero SIGSEGV risk.
+    if(handle == nullptr || handle->is_init != _rocsparselt_handle::IMPL_MAGIC)
+        return false;
+    // Layer 2: ownership chain — copy-invalidation (same as alg_selection).
+    if(!is_safe_to_deref(handle->ownership))
+        return false;
+    const auto* ptr = reinterpret_cast<const uintptr_t*>(handle->ownership);
+    return *ptr == handle->ownership;
 }
 
 bool check_is_init_mat_descr(const _rocsparselt_mat_descr* mat)
 {
-    if(mat != nullptr && mat->is_init != 0 && mat->is_init == (uintptr_t)mat->handle)
-        return mat->m_type == rocsparselt_matrix_type_unknown ? false : true;
-    return false;
+    if(mat == nullptr || !is_safe_to_deref(mat->is_init))
+        return false;
+    const auto* ptr = reinterpret_cast<const uintptr_t*>(mat->is_init);
+    if(*ptr != mat->is_init)
+        return false;
+    return mat->m_type != rocsparselt_matrix_type_unknown;
 }
 
 bool check_is_init_matmul_descr(const _rocsparselt_matmul_descr* matmul)
 {
-    return matmul != nullptr && matmul->is_init != 0
+    // matmul_descr has no destroy API so copies must always be valid.
+    // Use handle-address token: is_init == (uintptr_t)handle — no dangling pointer risk.
+    return matmul != nullptr && is_safe_to_deref(matmul->is_init)
            && matmul->is_init == (uintptr_t)matmul->handle;
 }
 
 bool check_is_init_matmul_alg_selection(const _rocsparselt_matmul_alg_selection* alg_selection)
 {
-    return alg_selection != nullptr && alg_selection->is_init != 0
-           && alg_selection->is_init == (uintptr_t)alg_selection->handle;
+    // Layer 1: ALG_MAGIC — fast check without dereference.
+    //   Protects against stack residuals even without data={} zero-init (1/2^64 false positive).
+    if(alg_selection == nullptr
+       || alg_selection->is_init != _rocsparselt_matmul_alg_selection::ALG_MAGIC)
+        return false;
+    // Layer 2: ownership chain — copy-invalidation check.
+    //   ownership stores address of original's ownership field (self-referential for original).
+    //   clear() zeroes ownership → copies reading through their stored address see 0 → invalid.
+    //   Only reached if is_init == ALG_MAGIC, so stack-residual false positive risk is ~0.
+    if(!is_safe_to_deref(alg_selection->ownership))
+        return false;
+    const auto* ptr = reinterpret_cast<const uintptr_t*>(alg_selection->ownership);
+    return *ptr == alg_selection->ownership;
 }
 
 bool check_is_init_plan(const _rocsparselt_matmul_plan* plan)
 {
-    if(plan != nullptr && plan->is_init != 0 && plan->is_init == (uintptr_t)plan->handle)
-        return (plan->matmul_descr == nullptr || plan->alg_selection == nullptr) ? false : true;
-    return false;
+    // IMPL_MAGIC check: no pointer dereference, safe against stack garbage.
+    // Plan holds only non-owning references (no heap resources), so destroying
+    // both original and copy is safe — no double-free risk.
+    return plan != nullptr
+           && plan->is_init == _rocsparselt_matmul_plan::IMPL_MAGIC
+           && plan->matmul_descr != nullptr
+           && plan->alg_selection != nullptr;
 }
 
-_rocsparselt_matmul_datatype is_matmul_datatype_valid(hipDataType a, hipDataType b, hipDataType c, hipDataType d, rocsparselt_compute_type compute)
+_rocsparselt_matmul_datatype is_matmul_datatype_valid(
+    hipDataType a, hipDataType b, hipDataType c, hipDataType d, rocsparselt_compute_type compute)
 {
     for(auto valid : valid_matmul_datatypes)
     {
         if(a == valid.a && b == valid.b && c == valid.c && d == valid.d && compute == valid.compute)
-          return valid.type;
+            return valid.type;
     }
     return MATMUL_DATATYPE_UNKNOWN;
 };

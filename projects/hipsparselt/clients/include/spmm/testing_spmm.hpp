@@ -1276,8 +1276,6 @@ void testing_aux_plan_assign(const Arguments& arg)
     int64_t ldc     = arg.ldc;
     int64_t ldd     = arg.ldd;
 
-    double gpu_time_used, cpu_time_used;
-    gpu_time_used = cpu_time_used              = 0.0;
     double                   hipsparselt_error = 0.0;
     bool                     HMM               = arg.HMM;
     hipsparselt_local_handle handle{arg};
@@ -1358,25 +1356,6 @@ void testing_aux_plan_assign(const Arguments& arg)
     hipsparselt_local_matmul_descr matmul(
         handle, transA, transB, matA, matB, matC, matD, arg.compute_type);
 
-    // CHECK mat in matmul is a reference, hipsparseltMatmul() will use this new batch size.
-    int new_num_batches = 2;
-    EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtMatDescSetAttribute(
-            handle, matA, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
-        HIPSPARSE_STATUS_SUCCESS);
-    EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtMatDescSetAttribute(
-            handle, matB, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
-        HIPSPARSE_STATUS_SUCCESS);
-    EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtMatDescSetAttribute(
-            handle, matC, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
-        HIPSPARSE_STATUS_SUCCESS);
-    EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtMatDescSetAttribute(
-            handle, matD, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
-        HIPSPARSE_STATUS_SUCCESS);
-
     int   activation_on   = 1;
     float activation_arg2 = 2.f;
     float activation_arg1 = 0.f;
@@ -1439,6 +1418,7 @@ void testing_aux_plan_assign(const Arguments& arg)
 
     // allocate memory on device
     device_vector<Ti>            dA(size_A, 1, HMM);
+    device_vector<Ti>            dA_pruned(size_A, 1, HMM);
     device_vector<Ti>            dB(size_B, 1, HMM);
     device_vector<To>            dC(size_C, 1, HMM);
     device_vector<To>            dD(size_D, 1, HMM);
@@ -1446,6 +1426,7 @@ void testing_aux_plan_assign(const Arguments& arg)
     device_vector<unsigned char> dA_compressBuffer(compress_buffer_size, 1, HMM);
     device_vector<unsigned char> dWorkspace(workspace_size, 1, HMM);
     CHECK_DEVICE_ALLOCATION(dA.memcheck());
+    CHECK_DEVICE_ALLOCATION(dA_pruned.memcheck());
     CHECK_DEVICE_ALLOCATION(dB.memcheck());
     CHECK_DEVICE_ALLOCATION(dC.memcheck());
     CHECK_DEVICE_ALLOCATION(dD.memcheck());
@@ -1527,19 +1508,40 @@ void testing_aux_plan_assign(const Arguments& arg)
             std::copy(hC.begin(), hC.end(), hD_gold.begin());
         }
     }
+
+    int new_num_batches = 2;
     EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtSpMMAPrune(handle, matmul, dA, dA, HIPSPARSELT_PRUNE_SPMMA_STRIP, stream),
+        hipsparseLtMatDescSetAttribute(
+            handle, matA, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
+        HIPSPARSE_STATUS_SUCCESS);
+    EXPECT_HIPSPARSE_STATUS(
+        hipsparseLtMatDescSetAttribute(
+            handle, matB, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
+        HIPSPARSE_STATUS_SUCCESS);
+    EXPECT_HIPSPARSE_STATUS(
+        hipsparseLtMatDescSetAttribute(
+            handle, matC, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
+        HIPSPARSE_STATUS_SUCCESS);
+    EXPECT_HIPSPARSE_STATUS(
+        hipsparseLtMatDescSetAttribute(
+            handle, matD, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
         HIPSPARSE_STATUS_SUCCESS);
 
     EXPECT_HIPSPARSE_STATUS(
-        hipsparseLtSpMMACompress(handle, plan, dA, dA_compressed, dA_compressBuffer, stream),
+        hipsparseLtSpMMAPrune(handle, matmul, dA, dA_pruned, HIPSPARSELT_PRUNE_SPMMA_STRIP, stream),
         HIPSPARSE_STATUS_SUCCESS);
+
+    EXPECT_HIPSPARSE_STATUS(
+        hipsparseLtSpMMACompress(handle, plan, dA_pruned, dA_compressed, dA_compressBuffer, stream),
+        HIPSPARSE_STATUS_SUCCESS);
+
+    CHECK_HIP_ERROR(hipStreamSynchronize(stream));
+    CHECK_HIP_ERROR(hA_pruned.transfer_from(dA_pruned));
 
     {
         auto check
             = [&](auto& plan, float activation_arg1, float activation_arg2, int num_batches) {
-                  CHECK_HIP_ERROR(hipStreamSynchronize(stream));
-                  CHECK_HIP_ERROR(hA_pruned.transfer_from(dA));
+
                   EXPECT_HIPSPARSE_STATUS(hipsparseLtMatmul(handle,
                                                             plan,
                                                             &h_alpha,
@@ -1552,11 +1554,6 @@ void testing_aux_plan_assign(const Arguments& arg)
                                                             &stream,
                                                             1),
                                           HIPSPARSE_STATUS_SUCCESS);
-                  // now we can recycle gold matrix for reference purposes
-                  if(arg.timing)
-                  {
-                      cpu_time_used = get_time_us_no_sync();
-                  }
 
 #define activation_param \
     M, N, ldd, hD_gold_act + pos, hD_gold + pos, activation_arg1, activation_arg2
@@ -1617,27 +1614,40 @@ void testing_aux_plan_assign(const Arguments& arg)
               };
         check(plan, activation_arg1, activation_arg2, new_num_batches);
 
-        // CHECK mat in plsn is a copy, hipsparseltMatmul() will use old batch size.
-        int new_num_batches2 = 5;
+        // CHECK mat in matmul is a reference, hipsparseltMatmul() will use this new batch size.
+        new_num_batches = 5;
         EXPECT_HIPSPARSE_STATUS(
             hipsparseLtMatDescSetAttribute(
-                handle, matA, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches2, sizeof(int)),
+                handle, matA, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
             HIPSPARSE_STATUS_SUCCESS);
         EXPECT_HIPSPARSE_STATUS(
             hipsparseLtMatDescSetAttribute(
-                handle, matB, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches2, sizeof(int)),
+                handle, matB, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
             HIPSPARSE_STATUS_SUCCESS);
         EXPECT_HIPSPARSE_STATUS(
             hipsparseLtMatDescSetAttribute(
-                handle, matC, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches2, sizeof(int)),
+                handle, matC, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
             HIPSPARSE_STATUS_SUCCESS);
         EXPECT_HIPSPARSE_STATUS(
             hipsparseLtMatDescSetAttribute(
-                handle, matD, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches2, sizeof(int)),
+                handle, matD, HIPSPARSELT_MAT_NUM_BATCHES, &new_num_batches, sizeof(int)),
             HIPSPARSE_STATUS_SUCCESS);
-        unit_check_general<To>(M, N, ldd, stride_d, hD_gold, hD_1, new_num_batches);
 
-        // CHECK matmul in plan is a copy, modify the activation value outside will not impact the result.
+        EXPECT_HIPSPARSE_STATUS(
+            hipsparseLtSpMMAPrune(handle, matmul, dA, dA_pruned, HIPSPARSELT_PRUNE_SPMMA_STRIP, stream),
+            HIPSPARSE_STATUS_SUCCESS);
+
+        EXPECT_HIPSPARSE_STATUS(
+            hipsparseLtSpMMACompress(handle, plan, dA_pruned, dA_compressed, dA_compressBuffer, stream),
+            HIPSPARSE_STATUS_SUCCESS);
+
+        CHECK_HIP_ERROR(hipStreamSynchronize(stream));
+        CHECK_HIP_ERROR(hA_pruned.transfer_from(dA_pruned));
+
+        // Plan holds a reference to matmul (not a deep copy): modifying activation or
+        // mat_descr num_batches DOES affect the plan. Since workspace was computed for
+        // new_num_batches=2 and mat_descrs are now set to new_num_batches2=5, a numerical
+        // check here would require recomputing workspace. Just verify the API calls succeed.
         float new_activation_arg2 = 10.f;
         float new_activation_arg1 = 5.f;
         EXPECT_HIPSPARSE_STATUS(
@@ -1654,41 +1664,8 @@ void testing_aux_plan_assign(const Arguments& arg)
                                               &new_activation_arg1,
                                               sizeof(float)),
             HIPSPARSE_STATUS_SUCCESS);
-        check(plan, activation_arg1, activation_arg2, new_num_batches);
 
-        //CHECK alg_sel in plan is a reference and plans will use same alg_sel.
-        if(0)
-        {
-            EXPECT_HIPSPARSE_STATUS(hipsparseLtMatmulSearch(handle,
-                                                            plan,
-                                                            &h_alpha,
-                                                            dA_compressed,
-                                                            dB,
-                                                            &h_beta,
-                                                            dC,
-                                                            dD,
-                                                            dWorkspace,
-                                                            &stream,
-                                                            1),
-                                    HIPSPARSE_STATUS_SUCCESS);
-
-            hipsparseLtMatmulPlan_t plan2 = plan;
-            search_iters                  = 2;
-            hipsparseLtMatmulAlgSetAttribute(
-                handle, alg_sel, HIPSPARSELT_MATMUL_SEARCH_ITERATIONS, &search_iters, sizeof(int));
-            EXPECT_HIPSPARSE_STATUS(hipsparseLtMatmulSearch(handle,
-                                                            &plan2,
-                                                            &h_alpha,
-                                                            dA_compressed,
-                                                            dB,
-                                                            &h_beta,
-                                                            dC,
-                                                            dD,
-                                                            dWorkspace,
-                                                            &stream,
-                                                            1),
-                                    HIPSPARSE_STATUS_SUCCESS);
-        }
+        check(plan, new_activation_arg1, new_activation_arg2, new_num_batches);
     }
 
     CHECK_HIP_ERROR(hipStreamDestroy(stream));

@@ -126,6 +126,16 @@ namespace
                 testing_aux_get_workspace_size_bad_arg(arg);
             else if(!strcmp(arg.function, "aux_get_workspace_size"))
                 testing_aux_get_workspace_size(arg);
+            else if(!strcmp(arg.function, "aux_handle_struct_copy"))
+                testing_aux_handle_struct_copy(arg);
+            else if(!strcmp(arg.function, "aux_mat_struct_copy"))
+                testing_aux_mat_struct_copy(arg);
+            else if(!strcmp(arg.function, "aux_matmul_struct_copy"))
+                testing_aux_matmul_struct_copy(arg);
+            else if(!strcmp(arg.function, "aux_matmul_alg_struct_copy"))
+                testing_aux_matmul_alg_struct_copy(arg);
+            else if(!strcmp(arg.function, "aux_matmul_plan_struct_copy"))
+                testing_aux_matmul_plan_struct_copy(arg);            
             else
                 FAIL() << "Internal error: Test called with unknown function: " << arg.function;
         }
@@ -171,7 +181,12 @@ namespace
                    || !strcmp(arg.function, "aux_matmul_plan_init")
                    || !strcmp(arg.function, "aux_matmul_plan_destroy_bad_arg")
                    || !strcmp(arg.function, "aux_get_workspace_size_bad_arg")
-                   || !strcmp(arg.function, "aux_get_workspace_size");
+                   || !strcmp(arg.function, "aux_get_workspace_size")
+                   || !strcmp(arg.function, "aux_handle_struct_copy")
+                   || !strcmp(arg.function, "aux_mat_struct_copy")
+                   || !strcmp(arg.function, "aux_matmul_struct_copy")
+                   || !strcmp(arg.function, "aux_matmul_alg_struct_copy")
+                   || !strcmp(arg.function, "aux_matmul_plan_struct_copy");
         }
 
         // Google Test name suffix based on parameters

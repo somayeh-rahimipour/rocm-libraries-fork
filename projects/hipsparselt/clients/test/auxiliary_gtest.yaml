@@ -153,5 +153,29 @@ Tests:
   category: smoke
   function:
     - aux_get_version: *hpa_half_precision
+# Struct-copy behavior: verify all 5 opaque structs are invalid after b = a
+- name: aux_handle_struct_copy
+  category: smoke
+  function:
+    - aux_handle_struct_copy: *hpa_half_precision
 
+- name: aux_mat_struct_copy
+  category: smoke
+  function:
+    - aux_mat_struct_copy: *hpa_half_precision
+
+- name: aux_matmul_struct_copy
+  category: smoke
+  function:
+    - aux_matmul_struct_copy: *hpa_half_precision
+
+- name: aux_matmul_alg_struct_copy
+  category: smoke
+  function:
+    - aux_matmul_alg_struct_copy: *hpa_half_precision
+
+- name: aux_matmul_plan_struct_copy
+  category: smoke
+  function:
+    - aux_matmul_plan_struct_copy: *hpa_half_precision
 ...
