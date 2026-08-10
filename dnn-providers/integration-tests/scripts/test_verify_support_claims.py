@@ -172,7 +172,10 @@ class TestSweepSchema:
 
 
 class TestEnforcementLevel:
-    def test_missing_meta_json_fails(self, bundle_root: Path) -> None:
+    def test_missing_meta_json_passes(self, bundle_root: Path) -> None:
+        # No metadata at all means the default rung, "full". The writer must be
+        # able to claim such a bundle -- most bundles in the tree have no
+        # meta.json -- so this is not a violation.
         _write_json(bundle_root / "A" / "Small.json", {})
         _write_json(
             bundle_root / "A" / "Small.support.json",
@@ -181,10 +184,11 @@ class TestEnforcementLevel:
                 "claims": {"ENGINE": {"gfx942": ["linux"]}},
             },
         )
-        errors = verify_all(bundle_root)
-        assert any("enforcement_level" in e for e in errors)
+        assert verify_all(bundle_root) == []
 
-    def test_missing_enforcement_level_in_meta_fails(self, bundle_root: Path) -> None:
+    def test_missing_enforcement_level_in_meta_passes(self, bundle_root: Path) -> None:
+        # Same default, reached the other way: metadata exists but says nothing
+        # about enforcement.
         _write_json(bundle_root / "A" / "Small.json", {})
         _write_json(bundle_root / "A" / "Small.meta.json", {"seed": 42})
         _write_json(
@@ -194,8 +198,7 @@ class TestEnforcementLevel:
                 "claims": {"ENGINE": {"gfx942": ["linux"]}},
             },
         )
-        errors = verify_all(bundle_root)
-        assert any("enforcement_level is required" in e for e in errors)
+        assert verify_all(bundle_root) == []
 
     def test_invalid_enforcement_level_fails(self, bundle_root: Path) -> None:
         _write_json(bundle_root / "A" / "Small.json", {})

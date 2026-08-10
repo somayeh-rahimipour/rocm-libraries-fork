@@ -20,36 +20,6 @@ namespace hipdnn_integration_tests::bundle
 namespace
 {
 
-// diagnostic path -> sidecar path, isSweep
-// "dir/Small.json" → {"dir/Small.support.json", false}
-// "dir/sweep.json#caseId" → {"dir/support.json", true}
-struct SidecarTarget
-{
-    std::filesystem::path sidecarPath;
-    bool isSweep = false;
-};
-
-SidecarTarget resolveSidecarTarget(const std::string& diagnosticPath)
-{
-    const auto hashPos = diagnosticPath.find('#');
-    if(hashPos != std::string::npos)
-    {
-        const auto sweepJsonPath = std::filesystem::path(diagnosticPath.substr(0, hashPos));
-        return {sweepJsonPath.parent_path() / "support.json", true};
-    }
-    return {supportJsonPath(std::filesystem::path(diagnosticPath)), false};
-}
-
-std::string extractCaseId(const std::string& diagnosticPath)
-{
-    const auto hashPos = diagnosticPath.find('#');
-    if(hashPos == std::string::npos)
-    {
-        return {};
-    }
-    return diagnosticPath.substr(hashPos + 1);
-}
-
 void overlaySingleGraphCell(SupportClaims& existing,
                             const std::string& engineName,
                             const std::string& arch,
@@ -110,10 +80,10 @@ SweepSupportClaims regroupSweepClaims(const FlatSweepMap& flat, int version)
 
     for(const auto& [engine, caseMap] : flat)
     {
-        // Bucket cases by identical support footprint.
-        // Use the canonical JSON string of the support map as the grouping key.
-        std::map<std::string, std::vector<std::string>> footprintToCases;
-        std::map<std::string, ArchPlatformMap> footprintToSupport;
+        // Bucket cases by identical support footprint. ArchPlatformMap is a
+        // std::map of std::sets, so it is directly usable as a map key — two
+        // cases land in the same bucket exactly when their support is equal.
+        std::map<ArchPlatformMap, std::vector<std::string>> casesByFootprint;
 
         for(const auto& [caseId, supportMap] : caseMap)
         {
@@ -121,19 +91,14 @@ SweepSupportClaims regroupSweepClaims(const FlatSweepMap& flat, int version)
             {
                 continue;
             }
-            const auto key = archPlatformMapToJson(supportMap).dump();
-            footprintToCases[key].push_back(caseId);
-            footprintToSupport[key] = supportMap;
+            casesByFootprint[supportMap].push_back(caseId);
         }
 
         std::vector<SweepClaimGroup> groups;
-        for(auto& [key, cases] : footprintToCases)
+        for(auto& [supportMap, cases] : casesByFootprint)
         {
             std::sort(cases.begin(), cases.end());
-            SweepClaimGroup group;
-            group.cases = std::move(cases);
-            group.support = footprintToSupport.at(key);
-            groups.push_back(std::move(group));
+            groups.push_back({std::move(cases), supportMap});
         }
 
         // Order groups by their first case id.
@@ -160,8 +125,8 @@ bool writeIfChanged(const std::filesystem::path& filePath,
         std::ifstream existingFile(filePath);
         if(existingFile)
         {
-            std::string existingContent((std::istreambuf_iterator<char>(existingFile)),
-                                        std::istreambuf_iterator<char>());
+            const std::string existingContent((std::istreambuf_iterator<char>(existingFile)),
+                                              std::istreambuf_iterator<char>());
             if(existingContent == newContent)
             {
                 ++summary.filesUnchanged;
@@ -192,43 +157,30 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
 {
     WriteSummary summary;
 
-    // Group observations by sidecar file.
-    struct PerFileObservation
+    // One sidecar file's worth of work. isSweep is a property of the bundle,
+    // not of the engine queried, so every observation landing here agrees on it.
+    struct SidecarTarget
     {
-        std::string caseId; // empty for single-graph
-        std::string engineName;
-        std::string arch;
-        std::string platform;
-        bool engineIsSupported;
+        bool isSweep = false;
+        std::vector<SupportObservation> observations;
     };
 
-    std::map<std::filesystem::path, std::vector<PerFileObservation>> observationsByFile;
-    std::map<std::filesystem::path, bool> fileIsSweep;
-
+    std::map<std::filesystem::path, SidecarTarget> targetsBySidecarPath;
     for(const auto& observation : observations)
     {
-        const auto target = resolveSidecarTarget(observation.diagnosticPath);
-        const auto caseId = extractCaseId(observation.diagnosticPath);
-
-        observationsByFile[target.sidecarPath].push_back({caseId,
-                                                          observation.engineName,
-                                                          observation.arch,
-                                                          observation.platform,
-                                                          observation.engineIsSupported});
-        fileIsSweep[target.sidecarPath] = target.isSweep;
+        auto& target = targetsBySidecarPath[observation.claimLocator.sidecarPath];
+        target.isSweep = observation.claimLocator.isSweep();
+        target.observations.push_back(observation);
     }
 
-    for(const auto& [sidecarPath, fileObservations] : observationsByFile)
+    // A sidecar with no observations is never a key here, so the RFC §9.2
+    // empty-write guard needs no explicit check: an absent observation set
+    // cannot reach the file, let alone null a claim in it.
+    for(const auto& [sidecarPath, target] : targetsBySidecarPath)
     {
-        if(fileObservations.empty())
-        {
-            ++summary.targetsSkipped;
-            continue;
-        }
+        const auto& fileObservations = target.observations;
 
-        const bool isSweep = fileIsSweep.at(sidecarPath);
-
-        if(isSweep)
+        if(target.isSweep)
         {
             SweepSupportClaims existing;
             existing.version = 1;
@@ -245,9 +197,10 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
 
             for(const auto& obs : fileObservations)
             {
+                const auto& caseId = obs.claimLocator.caseId;
                 if(obs.engineIsSupported)
                 {
-                    flat[obs.engineName][obs.caseId][obs.arch].insert(obs.platform);
+                    flat[obs.engineName][caseId][obs.arch].insert(obs.platform);
                 }
                 else
                 {
@@ -256,7 +209,7 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
                     {
                         continue;
                     }
-                    auto caseIt = engineIt->second.find(obs.caseId);
+                    auto caseIt = engineIt->second.find(caseId);
                     if(caseIt == engineIt->second.end())
                     {
                         continue;

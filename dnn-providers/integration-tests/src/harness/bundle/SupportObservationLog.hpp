@@ -7,12 +7,19 @@
 #include <string>
 #include <vector>
 
+#include "harness/bundle/SupportClaims.hpp"
+
 namespace hipdnn_integration_tests::bundle
 {
 
+// One (graph, engine, arch, platform) cell of observed support, as seen on the
+// hardware the run happened on.
 struct SupportObservation
 {
-    std::string diagnosticPath; // "dir/Small.json" or "dir/sweep.json#caseId"
+    // Says which sidecar this cell belongs in and, for a sweep, which case
+    // within it. Carried rather than re-derived: the writer must agree with the
+    // enforcer about the target file, and this is the value the enforcer used.
+    SupportClaimLocator claimLocator;
     std::string engineName;
     std::string arch;
     std::string platform;

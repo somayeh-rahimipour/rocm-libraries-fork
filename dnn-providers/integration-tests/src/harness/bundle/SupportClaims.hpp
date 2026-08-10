@@ -109,6 +109,19 @@ SweepSupportClaims parseSweepSupportClaimsJson(const nlohmann::json& json,
 ///   "dir/Small.json" -> "dir/Small.support.json"
 std::filesystem::path supportJsonPath(const std::filesystem::path& bundleJsonPath);
 
+/// Locator for a single-graph bundle: the sidecar sits beside the graph JSON,
+/// and there is no case id.
+///   "dir/Small.json" -> sidecar "dir/Small.support.json"
+SupportClaimLocator singleGraphClaimLocator(const std::filesystem::path& bundleJsonPath);
+
+/// Locator for one case of a template sweep. Every case of a sweep shares the
+/// single support.json next to sweep.json; `caseId` selects the claim group
+/// within it.
+///   "dir/sweep.json" + "case_a" -> sidecar    "dir/support.json"
+///                                  diagnostic "dir/sweep.json#case_a"
+SupportClaimLocator sweepCaseClaimLocator(const std::filesystem::path& sweepJsonPath,
+                                          const std::string& caseId);
+
 /// Load single-graph support claims from the {Name}.support.json companion of
 /// `bundleJsonPath`.
 ///
@@ -123,10 +136,6 @@ std::optional<SupportClaims> loadSupportClaims(const std::filesystem::path& bund
 /// `sweepDir`. Same optional-file / throw-on-malformed contract as
 /// loadSupportClaims().
 std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::path& sweepDir);
-
-/// Serialize an arch -> platforms map to JSON. Sorted keys and sorted platform
-/// arrays are guaranteed by the std::map / std::set backing types.
-nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap);
 
 /// Serialize a single-graph claims struct back to JSON.
 nlohmann::json toJson(const SupportClaims& claims);

@@ -9,9 +9,10 @@ Checks
 ------
 1. Schema: version == 1, claims is an object, arch -> array of tokens from
    {linux, windows}; sweep groups have non-empty cases + support.
-2. enforcement_level: any graph with a non-empty claim must carry a valid
-   enforcement_level in its metadata (single-graph: X.meta.json; sweep:
-   cases[].metadata.enforcement_level in sweep.json).
+2. enforcement_level: a graph with a non-empty claim must not declare an
+   unrecognised enforcement_level (single-graph: X.meta.json; sweep:
+   cases[].metadata.enforcement_level in sweep.json).  Absent is legal and
+   means "full" -- see check_enforcement_level_single for why.
 3. Sweep case ids: every claimed id must exist in the sibling sweep.json;
    no duplicate case id per engine.
 4. Orphaned sidecars: X.support.json without a sibling X.json; support.json
@@ -139,17 +140,21 @@ def _has_non_empty_claims(data: dict) -> bool:
 
 
 def check_enforcement_level_single(support_path: Path, errors: List[str]) -> None:
-    stem = support_path.stem  # "X.support" -> stem is "X"
+    """Reject a declared-but-unrecognised enforcement_level on a claimed bundle.
+
+    An *absent* level is not an error.  BundleMetadata.hpp defines absence as
+    EnforcementLevel::FULL -- the strictest rung -- so there is no ambiguity
+    about how a claim on such a bundle is enforced, and requiring the field
+    would mean writing "enforcement_level": "full" into every meta.json (and
+    inventing a meta.json for every bundle that has none) purely to restate the
+    default.  A *misspelt* level is a different matter: BundleMetadata.hpp
+    rejects the whole metadata object for it, so the bundle would silently lose
+    every other field it declares.  That is what this catches.
+    """
     # support_path is X.support.json => bundle is X.json => meta is X.meta.json
-    bundle_stem = Path(stem).stem  # "X.support" -> "X"
+    bundle_stem = Path(support_path.stem).stem  # "X.support.json" -> "X"
     meta_path = support_path.parent / f"{bundle_stem}.meta.json"
     if not meta_path.exists():
-        _error(
-            support_path,
-            f"claim-bearing sidecar requires {meta_path.name}"
-            " with a valid enforcement_level",
-            errors,
-        )
         return
     try:
         with open(meta_path) as f:
@@ -158,13 +163,7 @@ def check_enforcement_level_single(support_path: Path, errors: List[str]) -> Non
         _error(meta_path, f"cannot read metadata: {exc}", errors)
         return
     level = meta.get("enforcement_level")
-    if level is None:
-        _error(
-            meta_path,
-            "enforcement_level is required when a support claim exists",
-            errors,
-        )
-    elif level not in VALID_ENFORCEMENT_LEVELS:
+    if level is not None and level not in VALID_ENFORCEMENT_LEVELS:
         _error(
             meta_path,
             f"invalid enforcement_level '{level}'"

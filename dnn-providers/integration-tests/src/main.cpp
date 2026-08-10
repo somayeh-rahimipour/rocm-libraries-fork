@@ -127,7 +127,8 @@ int main(int argc, char** argv) noexcept
             .implicit_value(true)
             .help("Observe live engine support and write .support.json sidecars. "
                   "Requires --test-article (mode B: all engines, or mode C with "
-                  "--test-engine). Idempotent: no support change = zero git diff.");
+                  "--test-engine). Implies --allow-bundles, since bundles are what "
+                  "carry the claims. Idempotent: no support change = zero git diff.");
 
         std::vector<std::string> remainingArgs;
         try
@@ -371,7 +372,6 @@ int main(int argc, char** argv) noexcept
             std::cerr << "\n==== SUPPORT CLAIM WRITE SUMMARY ====\n"
                       << "  written: " << writeSummary.filesWritten
                       << "  unchanged: " << writeSummary.filesUnchanged
-                      << "  skipped: " << writeSummary.targetsSkipped
                       << "  errors: " << writeSummary.errors.size() << "\n";
             for(const auto& error : writeSummary.errors)
             {

@@ -91,6 +91,23 @@ ArchPlatformMap parseArchPlatformMap(const nlohmann::json& supportObj, std::stri
     return archMap;
 }
 
+// Inverse of parseArchPlatformMap(). Sorted arch keys and sorted platform
+// arrays are guaranteed by the std::map / std::set backing types, which is what
+// makes the emitted JSON canonical without an explicit sort.
+nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap)
+{
+    nlohmann::json obj = nlohmann::json::object();
+    for(const auto& [arch, platforms] : archMap)
+    {
+        obj[arch] = nlohmann::json::array();
+        for(const auto& platform : platforms)
+        {
+            obj[arch].push_back(platform);
+        }
+    }
+    return obj;
+}
+
 } // namespace
 
 bool SupportClaims::isClaimed(const std::string& engine,
@@ -257,6 +274,19 @@ std::filesystem::path supportJsonPath(const std::filesystem::path& bundleJsonPat
     return bundleJsonPath.parent_path() / (bundleJsonPath.stem().string() + ".support.json");
 }
 
+SupportClaimLocator singleGraphClaimLocator(const std::filesystem::path& bundleJsonPath)
+{
+    return {supportJsonPath(bundleJsonPath), /*caseId=*/{}, bundleJsonPath.string()};
+}
+
+SupportClaimLocator sweepCaseClaimLocator(const std::filesystem::path& sweepJsonPath,
+                                          const std::string& caseId)
+{
+    return {sweepJsonPath.parent_path() / "support.json",
+            caseId,
+            sweepJsonPath.string() + "#" + caseId};
+}
+
 std::optional<SupportClaims> loadSupportClaims(const std::filesystem::path& bundleJsonPath)
 {
     const auto path = supportJsonPath(bundleJsonPath);
@@ -301,20 +331,6 @@ std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::
     }
 
     return parseSweepSupportClaimsJson(json, path.string());
-}
-
-nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap)
-{
-    nlohmann::json obj = nlohmann::json::object();
-    for(const auto& [arch, platforms] : archMap)
-    {
-        obj[arch] = nlohmann::json::array();
-        for(const auto& platform : platforms)
-        {
-            obj[arch].push_back(platform);
-        }
-    }
-    return obj;
 }
 
 nlohmann::json toJson(const SupportClaims& claims)

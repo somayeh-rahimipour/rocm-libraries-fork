@@ -271,7 +271,7 @@ void IntegrationBundleVerificationHarness::observeSupportOnly()
             = std::find(engineIds.begin(), engineIds.end(), engine.id) != engineIds.end();
 
         SupportObservationLog::get().record(
-            {_claimLocator.diagnosticPath, engine.name, arch, platform, engineIsSupported});
+            {_claimLocator, engine.name, arch, platform, engineIsSupported});
     }
 }
 

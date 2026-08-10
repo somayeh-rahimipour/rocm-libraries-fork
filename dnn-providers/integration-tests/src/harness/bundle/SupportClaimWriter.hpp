@@ -15,8 +15,7 @@ namespace hipdnn_integration_tests::bundle
 struct WriteSummary
 {
     size_t filesWritten = 0;
-    size_t filesUnchanged = 0;
-    size_t targetsSkipped = 0;
+    size_t filesUnchanged = 0; // on-disk bytes already matched — no mtime bump
     std::vector<std::string> errors;
 };
 
