@@ -36,6 +36,7 @@
 #include "stinkytofu/pipeline/OptimizationPasses.hpp"
 #include "stinkytofu/pipeline/ScopeAdaptor.hpp"
 #include "stinkytofu/transforms/asm/AccumulateInstructionSizePass.hpp"
+#include "stinkytofu/transforms/asm/AsmMovePropagationPass.hpp"
 #include "stinkytofu/transforms/asm/CFGBuilderPass.hpp"
 #include "stinkytofu/transforms/asm/EstimateAsmCyclesPass.hpp"
 #include "stinkytofu/transforms/asm/FlattenCalleesPass.hpp"
@@ -179,6 +180,7 @@ bool buildGfx1250Pipeline(PassManager& pm, StinkyAsmModule& module, const PassBu
     // inherit the loop's src C MSB).
     pm.addPass(createCFGBuilderPass());
     pm.addPass(createRegionClonePass(moduleOptions.CloneList));
+    pm.addPass(createAsmMovePropagationPass());
     // Pass the whole-kernel function list so MSB is materialized for the entry function and
     // every callable function (each function owns its VGPR MSB hardware state).
     pm.addPass(createInsertVgprMsbPass(module.getFunctions()));
