@@ -83,7 +83,6 @@
 #   ``TEST_NAME_PREFIX``
 #     Optional prefix for generated category suite CTest names. Defaults to
 #     ``TARGET_NAME``.
-
 # Builds the build-tree command for an external integration test.
 #
 # Arguments:
@@ -93,8 +92,10 @@ macro(_build_external_integration_command out_var)
     set(${out_var}
         $<TARGET_FILE:hipdnn_integration_tests>
         --test-article $<TARGET_FILE:${ARG_PLUGIN_TARGET}>
-        --test-engine ${ARG_ENGINE_NAME}
     )
+    if(ARG_ENGINE_NAME)
+        list(APPEND ${out_var} --test-engine ${ARG_ENGINE_NAME})
+    endif()
     if(ARG_TEST_CONFIG)
         list(APPEND ${out_var} "--test-config" "${ARG_TEST_CONFIG}")
     endif()
@@ -137,7 +138,10 @@ macro(_stage_external_integration_install_test)
         file(RELATIVE_PATH _install_plugin "${_install_cwd_abs}" "${_plugin_abs}")
 
         if(NOT _GENERATE_EXTERNAL_CATEGORY_SUITES)
-            set(_install_cmd "add_test(\"${ARG_TARGET_NAME}\" \"${_install_bin}\" \"--test-article\" \"${_install_plugin}\" \"--test-engine\" \"${ARG_ENGINE_NAME}\"")
+            set(_install_cmd "add_test(\"${ARG_TARGET_NAME}\" \"${_install_bin}\" \"--test-article\" \"${_install_plugin}\"")
+            if(ARG_ENGINE_NAME)
+                string(APPEND _install_cmd " \"--test-engine\" \"${ARG_ENGINE_NAME}\"")
+            endif()
             if(ARG_TEST_CONFIG)
                 string(APPEND _install_cmd " \"--test-config\" \"${_install_config}\"")
             endif()
@@ -185,8 +189,10 @@ macro(_add_external_integration_category_suites)
 
         set(_category_command_args
             "--test-article" "$<TARGET_FILE:${ARG_PLUGIN_TARGET}>"
-            "--test-engine" "${ARG_ENGINE_NAME}"
         )
+        if(ARG_ENGINE_NAME)
+            list(APPEND _category_command_args "--test-engine" "${ARG_ENGINE_NAME}")
+        endif()
         if(ARG_TEST_CONFIG)
             list(APPEND _category_command_args "--test-config" "${ARG_TEST_CONFIG}")
         endif()
@@ -197,7 +203,7 @@ macro(_add_external_integration_category_suites)
         set(_apply_category_args
             TEST_NAME_PREFIX "${_category_prefix}"
             COMMAND_ARGS ${_category_command_args}
-            ADDITIONAL_LABELS "integration_test" "slow" "external_integration_test" "${ARG_ENGINE_NAME}"
+            ADDITIONAL_LABELS "integration_test" "slow" "external_integration_test" "${_ENGINE_LABEL}"
         )
         if(ARG_ENVIRONMENT)
             list(APPEND _apply_category_args ENVIRONMENT ${ARG_ENVIRONMENT})
@@ -213,8 +219,10 @@ macro(_add_external_integration_category_suites)
         if(ARG_INSTALL_TEST_FILE AND _install_bin)
             set(_category_install_command_args
                 "--test-article" "${_install_plugin}"
-                "--test-engine" "${ARG_ENGINE_NAME}"
             )
+            if(ARG_ENGINE_NAME)
+                list(APPEND _category_install_command_args "--test-engine" "${ARG_ENGINE_NAME}")
+            endif()
             if(ARG_TEST_CONFIG)
                 list(APPEND _category_install_command_args "--test-config" "${_install_config}")
             endif()
@@ -236,6 +244,54 @@ macro(_add_external_integration_category_suites)
             ${_apply_category_args}
         )
     endif()
+endmacro()
+
+# Shared implementation for both public entry points. Builds the command,
+# registers the custom target, adds the CTest entry (or delegates to category
+# suites), and stages the install-tree test.
+#
+# Expects: ARG_* from cmake_parse_arguments and _ENGINE_LABEL already set.
+# ~~~
+macro(_external_integration_test_impl)
+    _build_external_integration_command(_CMD)
+
+    set(_TARGET_CMD ${_CMD})
+    if(ARG_ENVIRONMENT)
+        set(_TARGET_CMD ${CMAKE_COMMAND} -E env ${ARG_ENVIRONMENT} ${_CMD})
+    endif()
+
+    add_custom_target(${ARG_TARGET_NAME}
+        COMMAND ${_TARGET_CMD}
+        DEPENDS ${ARG_PLUGIN_TARGET} hipdnn_integration_tests
+        COMMENT "Running integration tests (${_ENGINE_LABEL})"
+        USES_TERMINAL
+        VERBATIM
+    )
+
+    set(_GENERATE_EXTERNAL_CATEGORY_SUITES FALSE)
+    if(ARG_TEST_CATEGORIES_YAML AND COMMAND apply_test_category_labels)
+        set(_GENERATE_EXTERNAL_CATEGORY_SUITES TRUE)
+    endif()
+
+    set(_LABELS "integration_test;slow;external_integration_test;${_ENGINE_LABEL}")
+    if(NOT _GENERATE_EXTERNAL_CATEGORY_SUITES)
+        add_test(NAME ${ARG_TARGET_NAME} COMMAND ${_CMD})
+        set_tests_properties(${ARG_TARGET_NAME} PROPERTIES LABELS "${_LABELS}")
+        if(ARG_ENVIRONMENT)
+            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES ENVIRONMENT "${ARG_ENVIRONMENT}")
+        endif()
+        if(ARG_ENVIRONMENT_MODIFICATION)
+            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES
+                ENVIRONMENT_MODIFICATION "${ARG_ENVIRONMENT_MODIFICATION}")
+        endif()
+        if(ARG_FIXTURES_REQUIRED)
+            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES
+                FIXTURES_REQUIRED "${ARG_FIXTURES_REQUIRED}")
+        endif()
+    endif()
+
+    _stage_external_integration_install_test()
+    _add_external_integration_category_suites()
 endmacro()
 
 # Adds a custom target and optional CTest entries for an external integration test.
@@ -262,52 +318,46 @@ function(add_external_integration_test_target)
         message(FATAL_ERROR "add_external_integration_test_target: ENGINE_NAME is required")
     endif()
 
-    _build_external_integration_command(_CMD)
+    set(_ENGINE_LABEL "${ARG_ENGINE_NAME}")
+    _external_integration_test_impl()
+endfunction()
 
-    set(_TARGET_CMD ${_CMD})
-    if(ARG_ENVIRONMENT)
-        set(_TARGET_CMD ${CMAKE_COMMAND} -E env ${ARG_ENVIRONMENT} ${_CMD})
-    endif()
-
-    add_custom_target(${ARG_TARGET_NAME}
-        COMMAND ${_TARGET_CMD}
-        DEPENDS ${ARG_PLUGIN_TARGET} hipdnn_integration_tests
-        COMMENT "Running integration tests for ${ARG_ENGINE_NAME}"
-        USES_TERMINAL
-        VERBATIM
+#   Create a custom target that runs integration tests against ALL engines
+#   a plugin exposes (mode B — no ``--test-engine``).
+#
+#   Same interface as ``add_external_integration_test_target()`` minus
+#   ``ENGINE_NAME``. The CTest label uses ``all_engines`` instead of a
+#   per-engine name so ``ctest -L all_engines`` still selects it.
+#
+#     add_external_integration_test_target_all_engines(
+#         TARGET_NAME   <name>
+#         PLUGIN_TARGET <target>
+#         [INSTALL_SUBDIR <subdir>]
+#         [TEST_CATEGORIES_YAML <path>]
+#         [INSTALL_TEST_FILE <path>]
+#         [TEST_NAME_PREFIX <prefix>]
+#         [TEST_CONFIG <path>]
+#         [REFERENCE_EXECUTOR <cpu|gpu>]
+#         [ENVIRONMENT <VAR=value>...]
+#         [INSTALL_ENVIRONMENT <VAR=value>...]
+#         [GTEST_FILTER <filter>...]
+#     )
+function(add_external_integration_test_target_all_engines)
+    cmake_parse_arguments(
+        ARG
+        ""
+        "TARGET_NAME;PLUGIN_TARGET;INSTALL_SUBDIR;TEST_CONFIG;REFERENCE_EXECUTOR;TEST_CATEGORIES_YAML;INSTALL_TEST_FILE;TEST_NAME_PREFIX"
+        "GTEST_FILTER;ENVIRONMENT;INSTALL_ENVIRONMENT;ENVIRONMENT_MODIFICATION;FIXTURES_REQUIRED"
+        ${ARGN}
     )
 
-    set(_GENERATE_EXTERNAL_CATEGORY_SUITES FALSE)
-    if(ARG_TEST_CATEGORIES_YAML AND COMMAND apply_test_category_labels)
-        set(_GENERATE_EXTERNAL_CATEGORY_SUITES TRUE)
+    if(NOT ARG_TARGET_NAME)
+        message(FATAL_ERROR "add_external_integration_test_target_all_engines: TARGET_NAME is required")
+    endif()
+    if(NOT ARG_PLUGIN_TARGET)
+        message(FATAL_ERROR "add_external_integration_test_target_all_engines: PLUGIN_TARGET is required")
     endif()
 
-    # Register with ctest so the cross-provider integration suite is picked up
-    # by the calling project's `<project>-integration-check` target (which runs
-    # `ctest -L integration_test`) and by direct `ctest` invocations from the
-    # project's build subdir. Labels mirror add_integration_test_target so the
-    # test is selected the same way as the provider's own integration tests,
-    # plus an `external_integration_test` label and the engine name for filtering.
-    set(_LABELS "integration_test;slow;external_integration_test;${ARG_ENGINE_NAME}")
-    if(NOT _GENERATE_EXTERNAL_CATEGORY_SUITES)
-        add_test(NAME ${ARG_TARGET_NAME} COMMAND ${_CMD})
-        set_tests_properties(${ARG_TARGET_NAME} PROPERTIES LABELS "${_LABELS}")
-        if(ARG_ENVIRONMENT)
-            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES ENVIRONMENT "${ARG_ENVIRONMENT}")
-        endif()
-        if(ARG_ENVIRONMENT_MODIFICATION)
-            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES
-                ENVIRONMENT_MODIFICATION "${ARG_ENVIRONMENT_MODIFICATION}")
-        endif()
-        if(ARG_FIXTURES_REQUIRED)
-            set_tests_properties(${ARG_TARGET_NAME} PROPERTIES
-                FIXTURES_REQUIRED "${ARG_FIXTURES_REQUIRED}")
-        endif()
-    endif()
-
-    # Stage an install-tree add_test() snippet so install_provider_ctest_files
-    # can include this test in the installed CTestTestfile.cmake. Required for
-    # CI flows that invoke ctest from the install tree (e.g. TheRock).
-    _stage_external_integration_install_test()
-    _add_external_integration_category_suites()
+    set(_ENGINE_LABEL "all_engines")
+    _external_integration_test_impl()
 endfunction()

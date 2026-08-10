@@ -126,6 +126,10 @@ SupportResult evaluateSupport(hipdnn_frontend::ErrorCode errorCode,
                               const std::string& platform,
                               std::string_view queryMessage = {});
 
+/// True when the query resolved cleanly (OK or GRAPH_NOT_SUPPORTED) and
+/// the ranked list can be trusted.
+bool isResolved(hipdnn_frontend::ErrorCode code);
+
 /// Strip target features from a raw gcnArchName to get the base arch token.
 /// "gfx942:sramecc+:xnack-" → "gfx942"; bare "gfx942" is idempotent.
 std::string baseArchToken(std::string_view fullArch);
@@ -147,12 +151,18 @@ SupportResult checkSupportClaim(hipdnn_frontend::ErrorCode errorCode,
                                 const std::filesystem::path& bundlePath,
                                 std::string_view queryMessage = {});
 
-/// Multi-engine enforcement: evaluate every loaded engine's claim from a single
-/// query result. Loads the sidecar once and calls evaluateSupport per engine.
-/// Dispatches to single-graph or sweep-case claims based on locator.isSweep().
-/// NOT_ENFORCED verdicts (unclaimed + declined, the uninteresting majority) are
-/// filtered out — only SATISFIED, CLAIM_BROKEN, QUERY_ERRORED, and
-/// UNCLAIMED_SUPPORT are returned. Returns empty when the sidecar file is absent.
+/// Multi-engine observation: evaluate every loaded engine's claim from a single
+/// query result. Returns the full verdict set including NOT_ENFORCED, so callers
+/// that need the complete picture (the writer) get resolved declines too.
+/// Returns empty when the sidecar file is absent.
+std::vector<SupportResult> observeAllSupport(hipdnn_frontend::ErrorCode errorCode,
+                                             const std::vector<int64_t>& rankedIds,
+                                             const SupportClaimLocator& locator,
+                                             const std::vector<LoadedEngine>& loadedEngines,
+                                             std::string_view queryMessage = {});
+
+/// Multi-engine enforcement: observeAllSupport filtered to actionable verdicts.
+/// NOT_ENFORCED (unclaimed + declined, the uninteresting majority) are dropped.
 std::vector<SupportResult> checkAllSupportClaims(hipdnn_frontend::ErrorCode errorCode,
                                                  const std::vector<int64_t>& rankedIds,
                                                  const SupportClaimLocator& locator,

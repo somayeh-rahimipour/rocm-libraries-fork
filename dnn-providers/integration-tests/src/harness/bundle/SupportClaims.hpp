@@ -124,4 +124,13 @@ std::optional<SupportClaims> loadSupportClaims(const std::filesystem::path& bund
 /// loadSupportClaims().
 std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::path& sweepDir);
 
+/// Serialize a single-graph claims struct back to JSON.
+nlohmann::json toJson(const SupportClaims& claims);
+
+/// Serialize a sweep claims struct back to JSON.
+nlohmann::json toJson(const SweepSupportClaims& claims);
+
+/// Canonical JSON string: sorted keys, 2-space indent, trailing newline.
+std::string dumpCanonical(const nlohmann::json& json);
+
 } // namespace hipdnn_integration_tests::bundle

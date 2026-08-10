@@ -303,4 +303,64 @@ std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::
     return parseSweepSupportClaimsJson(json, path.string());
 }
 
+namespace
+{
+
+nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap)
+{
+    nlohmann::json obj = nlohmann::json::object();
+    for(const auto& [arch, platforms] : archMap)
+    {
+        obj[arch] = nlohmann::json::array();
+        for(const auto& platform : platforms)
+        {
+            obj[arch].push_back(platform);
+        }
+    }
+    return obj;
+}
+
+} // namespace
+
+nlohmann::json toJson(const SupportClaims& claims)
+{
+    nlohmann::json obj = nlohmann::json::object();
+    obj["version"] = claims.version;
+    obj["claims"] = nlohmann::json::object();
+    for(const auto& [engine, archMap] : claims.claims)
+    {
+        obj["claims"][engine] = archPlatformMapToJson(archMap);
+    }
+    return obj;
+}
+
+nlohmann::json toJson(const SweepSupportClaims& claims)
+{
+    nlohmann::json obj = nlohmann::json::object();
+    obj["version"] = claims.version;
+    obj["claims"] = nlohmann::json::object();
+    for(const auto& [engine, groups] : claims.claims)
+    {
+        auto groupsArray = nlohmann::json::array();
+        for(const auto& group : groups)
+        {
+            nlohmann::json groupObj = nlohmann::json::object();
+            groupObj["cases"] = nlohmann::json::array();
+            for(const auto& caseId : group.cases)
+            {
+                groupObj["cases"].push_back(caseId);
+            }
+            groupObj["support"] = archPlatformMapToJson(group.support);
+            groupsArray.push_back(std::move(groupObj));
+        }
+        obj["claims"][engine] = std::move(groupsArray);
+    }
+    return obj;
+}
+
+std::string dumpCanonical(const nlohmann::json& json)
+{
+    return json.dump(2) + "\n";
+}
+
 } // namespace hipdnn_integration_tests::bundle

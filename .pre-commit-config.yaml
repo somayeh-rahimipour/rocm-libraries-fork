@@ -101,6 +101,13 @@ repos:
         files: ^projects/hipdnn/(data_sdk|flatbuffers_sdk)/schemas/.*\.fbs$
         pass_filenames: true
 
+      - id: verify-support-claims
+        name: Verify support-claim sidecars (RFC 0015)
+        entry: python dnn-providers/integration-tests/scripts/verify_support_claims.py
+        language: python
+        pass_filenames: false
+        always_run: true
+
       - id: gtest-format-miopen
         name: GTest naming conventions (MIOpen)
         entry: python projects/miopen/test/utils/gtest_formating_checks.py

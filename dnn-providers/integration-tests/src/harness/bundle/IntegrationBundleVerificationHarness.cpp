@@ -19,6 +19,7 @@
 #include <hipdnn_test_sdk/utilities/VariantPackUtils.hpp>
 #include <hipdnn_test_sdk/utilities/detail/FlatbufferTensorAttributesUtils.hpp>
 
+#include "common/PlatformUtils.hpp"
 #include "harness/CpuReferenceGraphExecutorAdapter.hpp"
 #include "harness/EngineNotApplicableError.hpp"
 #include "harness/ReferenceCapabilityError.hpp"
@@ -27,6 +28,7 @@
 #include "harness/TomlGuards.hpp"
 #include "harness/bundle/LoadedEngineTable.hpp"
 #include "harness/bundle/SupportClaimReport.hpp"
+#include "harness/bundle/SupportObservationLog.hpp"
 #include "harness/bundle/SupportVerdict.hpp"
 #include "harness/bundle/UnverifiableBundleReport.hpp"
 #include "harness/gpu-graph-executor/GpuReferenceGraphExecutor.hpp"
@@ -228,8 +230,59 @@ void IntegrationBundleVerificationHarness::enforceAtLevel(EnforcementLevel level
     ASSERT_TRUE(result.is_good()) << "[rung=buildable] " << result.get_message();
 }
 
+void IntegrationBundleVerificationHarness::observeSupportOnly()
+{
+    auto handle = getSharedHandle();
+
+    const std::vector<uint8_t> graphBytes(
+        _bundle->graphBuffer.data(), _bundle->graphBuffer.data() + _bundle->graphBuffer.size());
+
+    hipdnn_frontend::graph::Graph graph;
+    auto err = graph.from_binary(handle, graphBytes);
+    if(err.is_bad())
+    {
+        return;
+    }
+
+    std::vector<int64_t> engineIds;
+    auto status = graph.get_ranked_engine_ids(engineIds);
+
+    if(!isResolved(status.get_code()))
+    {
+        return;
+    }
+
+    auto engines = LoadedEngineTable::get().all();
+    if(TestConfig::get().hasEngineName())
+    {
+        const std::string targetName(TestConfig::get().getEngineName());
+        engines.erase(std::remove_if(engines.begin(),
+                                     engines.end(),
+                                     [&](const LoadedEngine& e) { return e.name != targetName; }),
+                      engines.end());
+    }
+
+    const std::string arch = baseArchToken(TestConfig::get().getCurrentArch());
+    const std::string platform = currentPlatform();
+
+    for(const auto& engine : engines)
+    {
+        const bool engineIsSupported
+            = std::find(engineIds.begin(), engineIds.end(), engine.id) != engineIds.end();
+
+        SupportObservationLog::get().record(
+            {_claimLocator.diagnosticPath, engine.name, arch, platform, engineIsSupported});
+    }
+}
+
 void IntegrationBundleVerificationHarness::runComparison()
 {
+    if(TestConfig::get().writeSupportClaims())
+    {
+        observeSupportOnly();
+        return;
+    }
+
     if(TestConfig::get().enforceSupportClaims()
        && _bundle->metadata.enforcementLevel != EnforcementLevel::FULL)
     {

@@ -162,6 +162,8 @@ protected:
         return _inputFillRecipes;
     }
 
+    void observeSupportOnly();
+
 private:
     bool _requiresDevice;
     std::filesystem::path _bundlePath;

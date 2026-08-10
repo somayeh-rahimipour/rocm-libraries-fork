@@ -4,6 +4,7 @@
 add_executable(hipdnn_integration_tests_unit_tests
     main.cpp
     ../src/harness/bundle/IntegrationBundleVerificationHarness.cpp
+    ../src/harness/bundle/SupportClaimWriter.cpp
     ../src/harness/bundle/SupportClaims.cpp
     ../src/harness/bundle/SupportVerdict.cpp
     ../src/harness/input-init/FillInputs.cpp
@@ -30,6 +31,7 @@ add_executable(hipdnn_integration_tests_unit_tests
     TestErrorPaths.cpp
     TestLoadedEngineTable.cpp
     TestSupportClaimReport.cpp
+    TestSupportClaimWriter.cpp
     TestSupportVerdict.cpp
 )
 
