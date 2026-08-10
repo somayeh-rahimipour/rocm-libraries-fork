@@ -1982,16 +1982,12 @@ extern "C" miopenStatus_t miopenGetVersion(size_t* major, size_t* minor, size_t*
     return miopenGetVersion_impl(major, minor, patch);
 }
 
-// clang-format off
-// Keep this stub multi-line: investigation_q4_stub_count CTest counts `{` on
-// column 0 to enforce stub/header parity. See tools/wrapper/check_stub_count.cmake.
 extern "C" miopenStatus_t miopenCreate(miopenHandle_t* handle)
 {
     if(miopen::wrapper::Dispatch("miopenCreate") == miopen::wrapper::Route::Hipdnn)
         return forward_to_hipdnn("miopenCreate");
     return miopenCreate_impl(handle);
 }
-// clang-format on
 
 extern "C" miopenStatus_t miopenCreateWithStream(miopenHandle_t* handle,
                                                  miopenAcceleratorQueue_t stream)
