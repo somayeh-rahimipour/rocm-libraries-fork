@@ -121,7 +121,7 @@ SweepSupportClaims regroupSweepClaims(const FlatSweepMap& flat, int version)
             {
                 continue;
             }
-            const auto key = toJson(SupportClaims{1, {{"_", supportMap}}}).dump();
+            const auto key = archPlatformMapToJson(supportMap).dump();
             footprintToCases[key].push_back(caseId);
             footprintToSupport[key] = supportMap;
         }

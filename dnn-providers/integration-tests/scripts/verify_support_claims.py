@@ -99,7 +99,7 @@ def validate_sweep_schema(data: dict, path: Path, errors: List[str]) -> None:
                 errors,
             )
             continue
-        seen_case_ids: set[str] = set()
+        seen_case_ids = set()
         for i, group in enumerate(groups):
             ctx = f"claims.{engine_name}[{i}]"
             if not isinstance(group, dict):
@@ -219,7 +219,7 @@ def check_sweep_case_ids(
     except (json.JSONDecodeError, OSError) as exc:
         _error(sweep_path, f"cannot read sweep: {exc}", errors)
         return
-    valid_ids: set[str] = set()
+    valid_ids = set()
     for case_entry in sweep.get("cases", []):
         if isinstance(case_entry, dict) and isinstance(case_entry.get("id"), str):
             valid_ids.add(case_entry["id"])

@@ -124,6 +124,10 @@ std::optional<SupportClaims> loadSupportClaims(const std::filesystem::path& bund
 /// loadSupportClaims().
 std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::path& sweepDir);
 
+/// Serialize an arch -> platforms map to JSON. Sorted keys and sorted platform
+/// arrays are guaranteed by the std::map / std::set backing types.
+nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap);
+
 /// Serialize a single-graph claims struct back to JSON.
 nlohmann::json toJson(const SupportClaims& claims);
 

@@ -288,6 +288,13 @@ int main(int argc, char** argv) noexcept
             return 1;
         }
 
+        if(opts.writeSupportClaims && opts.enforceSupportClaims)
+        {
+            std::cerr << "--write-support-claims and --enforce-support-claims are "
+                      << "mutually exclusive.\n";
+            return 1;
+        }
+
         hipdnn_integration_tests::TestConfig::initialize(std::move(opts));
 
         // Reconstruct argc/argv for GTest from remaining (unknown) args.

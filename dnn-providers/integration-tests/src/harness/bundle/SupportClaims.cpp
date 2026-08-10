@@ -303,9 +303,6 @@ std::optional<SweepSupportClaims> loadSweepSupportClaims(const std::filesystem::
     return parseSweepSupportClaimsJson(json, path.string());
 }
 
-namespace
-{
-
 nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap)
 {
     nlohmann::json obj = nlohmann::json::object();
@@ -319,8 +316,6 @@ nlohmann::json archPlatformMapToJson(const ArchPlatformMap& archMap)
     }
     return obj;
 }
-
-} // namespace
 
 nlohmann::json toJson(const SupportClaims& claims)
 {
