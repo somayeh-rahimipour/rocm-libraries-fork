@@ -99,7 +99,14 @@ struct CompareDAGNodeByOriginalOrder {
 
 using OrderedReadyNodeSet = std::set<DAGNode*, CompareDAGNodeByOriginalOrder>;
 
-/// Selection policy for shortening windows immediately before wait-anchored WMMAs.
+/// Selection policy for shortening the window that ends at a matrix anchor.
+///
+/// A window is repaired when its anchor carries a final wait, and also when an
+/// earlier window pushed work into it: that carried work must keep moving, or it
+/// piles up in the first anchor that has no wait and stops being distributed.
+///
+/// Only work that issues no asynchronous memory operation is moved past an
+/// anchor, so loads keep their original position relative to every anchor.
 ///
 /// All tuning state and decisions live here so ReadyQueue mechanics remain
 /// independent from the repair heuristic.
@@ -117,14 +124,16 @@ class WaitAnchoredPickPolicy {
         if (!window_.active()) return nullptr;
 
         // Fill one fewer non-WMMA slot than the original window. Work carried
-        // from the preceding window counts against this budget.
+        // from preceding windows participates in picks, but does not increase
+        // this window's budget.
         if (window_.otherPicks < window_.otherPickBudget) {
             if (DAGNode* node = findReadyOtherBeforeAnchor(otherQueue)) return node;
         }
 
-        // Producers named by the final wait are mandatory even when they exceed
-        // the shortening budget.
-        if (DAGNode* node = findReadyWaitAffectingNode(otherQueue)) return node;
+        // Memory producers stay ahead of the anchor even once the budget is
+        // spent. Past a wait they would change how many operations its immediate
+        // leaves outstanding, and past any anchor they only delay issuing a load.
+        if (DAGNode* node = findReadyMemProducerBeforeAnchor(otherQueue)) return node;
 
         auto readyAnchor = wmmaQueue.find(window_.anchor);
         if (readyAnchor != wmmaQueue.end()) return *readyAnchor;
@@ -142,12 +151,17 @@ class WaitAnchoredPickPolicy {
     }
 
    private:
-    /// State for the currently active interval ending at a wait-anchored WMMA.
+    /// State for the currently active interval ending at a matrix anchor.
     struct WindowState {
         DAGNode* anchor = nullptr;
+        /// Null when the anchor carries no final wait. Such a window is repaired
+        /// only to keep carried work moving, and has no mandatory producers.
         const WaitAnchorInfo* anchorInfo = nullptr;
         unsigned startId = 0;
+        /// Nodes originally in this interval.
         unsigned originalOtherCount = 0;
+        /// Nodes originally in this interval plus work carried in from earlier ones.
+        unsigned availableOtherCount = 0;
         unsigned otherPickBudget = 0;
         unsigned otherPicks = 0;
 
@@ -164,56 +178,72 @@ class WaitAnchoredPickPolicy {
     RegionDAG& regionDAG_;
     const unsigned slotsToMovePastAnchor_;
     WindowState window_;
+    /// Non-WMMA work deferred past the previous anchor and not yet picked.
+    unsigned pendingCarry_ = 0;
 
     /// Account for a non-WMMA pick within the active window.
     void onOtherPicked() {
         if (!window_.active()) return;
 
         ++window_.otherPicks;
-        if (window_.otherPicks > window_.originalOtherCount) {
+        if (window_.otherPicks > window_.availableOtherCount) {
             PASS_DEBUG(std::cerr << "[WaitAnchoredReadyQueue onOtherPicked] anchor dagId="
                                  << window_.anchor->id
                                  << " not shortened: otherPicks=" << window_.otherPicks
-                                 << " exceeds originalOtherCount=" << window_.originalOtherCount
+                                 << " exceeds availableOtherCount=" << window_.availableOtherCount
                                  << '\n');
         }
     }
 
-    /// Close the current window and arm the next wait anchor when present.
+    /// Close the current window and arm the next matrix anchor when present.
     void onWmmaPicked(DAGNode& node) {
         if (window_.active()) {
-            assert(&node == window_.anchor &&
-                   "Only the active wait anchor may close a wait-anchored window");
+            assert(&node == window_.anchor && "Only the active anchor may close a window");
+            pendingCarry_ = window_.availableOtherCount > window_.otherPicks
+                                ? window_.availableOtherCount - window_.otherPicks
+                                : 0;
             window_.reset();
         }
 
         PASS_DEBUG(std::cerr << "[WaitAnchoredReadyQueue onWmmaPicked] picked WMMA dagId="
-                             << node.id << '\n');
+                             << node.id << " pendingCarry=" << pendingCarry_ << '\n');
 
         DAGNode* nextWmma = findNextWmmaInOriginalOrder(node.id);
         if (nextWmma == nullptr) return;
 
         auto waitAnchor = waitAnchors_.find(nextWmma->inst);
-        const bool isWaitAnchor = waitAnchor != waitAnchors_.end();
+        const WaitAnchorInfo* anchorInfo =
+            waitAnchor != waitAnchors_.end() ? &waitAnchor->second : nullptr;
         PASS_DEBUG(std::cerr << "[WaitAnchoredReadyQueue onWmmaPicked] next WMMA dagId="
-                             << nextWmma->id << " waitAnchored=" << (isWaitAnchor ? "yes" : "no")
-                             << '\n');
-        if (isWaitAnchor) armWindow(node, *nextWmma, waitAnchor->second);
+                             << nextWmma->id
+                             << " waitAnchored=" << (anchorInfo != nullptr ? "yes" : "no") << '\n');
+
+        // An anchor without a wait still needs a window once earlier windows
+        // pushed work into it; otherwise that work settles there permanently and
+        // the anchors after it keep their original, unrepaired spacing.
+        if (anchorInfo != nullptr || pendingCarry_ > 0) armWindow(node, *nextWmma, anchorInfo);
     }
 
-    /// Initialize shortening state for a wait-anchored WMMA interval.
-    void armWindow(const DAGNode& currentWmma, DAGNode& waitAnchor,
-                   const WaitAnchorInfo& anchorInfo) {
-        window_.anchor = &waitAnchor;
-        window_.anchorInfo = &anchorInfo;
+    /// Initialize shortening state for a matrix-anchored interval.
+    void armWindow(const DAGNode& currentWmma, DAGNode& anchor, const WaitAnchorInfo* anchorInfo) {
+        const unsigned ownOtherCount = anchor.id - currentWmma.id - 1;
+
+        window_.anchor = &anchor;
+        window_.anchorInfo = anchorInfo;
         window_.startId = currentWmma.id;
-        window_.originalOtherCount = waitAnchor.id - currentWmma.id - 1;
+        window_.originalOtherCount = ownOtherCount;
+        window_.availableOtherCount = ownOtherCount + pendingCarry_;
         window_.otherPickBudget = window_.originalOtherCount > slotsToMovePastAnchor_
                                       ? window_.originalOtherCount - slotsToMovePastAnchor_
                                       : 0;
         window_.otherPicks = 0;
-        PASS_DEBUG(std::cerr << "[WaitAnchoredReadyQueue armWindow] anchor dagId=" << waitAnchor.id
+        pendingCarry_ = 0;
+
+        PASS_DEBUG(std::cerr << "[WaitAnchoredReadyQueue armWindow] anchor dagId=" << anchor.id
+                             << " waitAnchored=" << (anchorInfo != nullptr ? "yes" : "no")
+                             << " ownOtherCount=" << ownOtherCount
                              << " originalOtherCount=" << window_.originalOtherCount
+                             << " availableOtherCount=" << window_.availableOtherCount
                              << " otherPickBudget=" << window_.otherPickBudget << '\n');
     }
 
@@ -222,16 +252,13 @@ class WaitAnchoredPickPolicy {
         return window_.active() && node.id > window_.startId && node.id < window_.anchor->id;
     }
 
-    /// Test whether a node produces a counter named by the active wait.
-    bool affectsActiveWait(const DAGNode& node) const {
-        if (!isInsideActiveWindow(node)) return false;
-        assert(window_.anchorInfo != nullptr);
-        const waitcnt::CounterKind kind = waitcnt::classifyMemOp(*node.inst);
-        return kind != waitcnt::CK_Count && counterApplies(kind, window_.anchorInfo->spec);
+    /// Test whether a node issues an asynchronous memory operation.
+    static bool isMemProducer(const DAGNode& node) {
+        return waitcnt::classifyMemOp(*node.inst) != waitcnt::CK_Count;
     }
 
     /// Test whether a DAG path connects a node to the active anchor.
-    bool reachesActiveWaitAnchor(const DAGNode& start) const {
+    bool reachesActiveAnchor(const DAGNode& start) const {
         if (!window_.active()) return false;
 
         std::vector<unsigned> worklist{start.id};
@@ -252,10 +279,10 @@ class WaitAnchoredPickPolicy {
         return false;
     }
 
-    /// Find the earliest ready producer required by the active wait.
-    DAGNode* findReadyWaitAffectingNode(const OrderedReadyNodeSet& otherQueue) const {
+    /// Find the earliest ready memory producer that belongs before the anchor.
+    DAGNode* findReadyMemProducerBeforeAnchor(const OrderedReadyNodeSet& otherQueue) const {
         for (DAGNode* node : otherQueue) {
-            if (affectsActiveWait(*node)) return node;
+            if (node->id < window_.anchor->id && isMemProducer(*node)) return node;
         }
         return nullptr;
     }
@@ -263,7 +290,7 @@ class WaitAnchoredPickPolicy {
     /// Find ready dependency work needed to make the anchor ready.
     DAGNode* findReadyAnchorPredecessor(const OrderedReadyNodeSet& otherQueue) const {
         for (DAGNode* node : otherQueue) {
-            if (isInsideActiveWindow(*node) && reachesActiveWaitAnchor(*node)) return node;
+            if (isInsideActiveWindow(*node) && reachesActiveAnchor(*node)) return node;
         }
         return nullptr;
     }
