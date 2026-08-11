@@ -99,11 +99,23 @@ struct CompareDAGNodeByOriginalOrder {
 
 using OrderedReadyNodeSet = std::set<DAGNode*, CompareDAGNodeByOriginalOrder>;
 
+/// Build-time toggle for the order in which a window's budgeted slots are filled.
+///
+/// When true, ready memory producers are selected ahead of other work so loads
+/// issue as early as the window allows. This only reorders within a window: the
+/// set of instructions on each side of an anchor is unaffected either way. The
+/// cost is that work carried in from an earlier window has a lower original ID,
+/// so placing it after those loads moves it further from its original position.
+/// Set to false to fill the budget in strict original order.
+constexpr bool kPreferMemProducerFirst = true;
+
 /// Selection policy for shortening the window that ends at a matrix anchor.
 ///
 /// A window is repaired when its anchor carries a final wait, and also when an
 /// earlier window pushed work into it: that carried work must keep moving, or it
 /// piles up in the first anchor that has no wait and stops being distributed.
+/// Only a wait anchor gives up slots of its own work; a wait-less anchor has no
+/// wait to protect and merely forwards the carry it received.
 ///
 /// Only work that issues no asynchronous memory operation is moved past an
 /// anchor, so loads keep their original position relative to every anchor.
@@ -233,9 +245,15 @@ class WaitAnchoredPickPolicy {
         window_.startId = currentWmma.id;
         window_.originalOtherCount = ownOtherCount;
         window_.availableOtherCount = ownOtherCount + pendingCarry_;
-        window_.otherPickBudget = window_.originalOtherCount > slotsToMovePastAnchor_
-                                      ? window_.originalOtherCount - slotsToMovePastAnchor_
-                                      : 0;
+        if (anchorInfo == nullptr) {
+            // Nothing to shorten without a wait, so this window keeps its own
+            // occupancy and only lets the carry pass through to the next anchor.
+            window_.otherPickBudget = window_.originalOtherCount;
+        } else {
+            window_.otherPickBudget = window_.originalOtherCount > slotsToMovePastAnchor_
+                                          ? window_.originalOtherCount - slotsToMovePastAnchor_
+                                          : 0;
+        }
         window_.otherPicks = 0;
         pendingCarry_ = 0;
 
@@ -298,6 +316,9 @@ class WaitAnchoredPickPolicy {
     /// Find stable ready work before the anchor, including carried work.
     DAGNode* findReadyOtherBeforeAnchor(const OrderedReadyNodeSet& otherQueue) const {
         if (!window_.active()) return nullptr;
+        if constexpr (kPreferMemProducerFirst) {
+            if (DAGNode* node = findReadyMemProducerBeforeAnchor(otherQueue)) return node;
+        }
         for (DAGNode* node : otherQueue) {
             // This includes carried-over work from the previous WMMA window.
             if (node->id < window_.anchor->id) return node;
