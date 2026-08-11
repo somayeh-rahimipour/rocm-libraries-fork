@@ -6830,7 +6830,6 @@ class KernelWriter(metaclass=abc.ABCMeta):
                                # s_wait_xcnt drains to order them.
                                "RequiresXCntForVolatileVMEM": bool(
                                    self.states.archCaps["RequiresXCntForVolatileVMEM"]),
-                               "WaitRepairSlotsAfterAnchor": 1,
                               }
 
       # Region-clone jobs for StinkyTofu RegionClonePass.

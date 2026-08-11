@@ -41,7 +41,7 @@ The backend runs the repair only when:
 
 - scheduling is enabled;
 - wait-count insertion is enabled;
-- `WaitRepairSlotsAfterAnchor` is positive.
+- the backend's local `waitRepairSlotsAfterAnchor` is positive.
 
 No wait-count recomputation runs after repair, so the pass treats emitted waits
 as fixed correctness constraints. This is the reason for most of the design: the
@@ -337,9 +337,10 @@ anchor and leaving it with nothing after it. A window armed without a wait has
 
 ### Tuning parameter
 
-`kSlotsToMovePastAnchor` is a pass argument defaulting to one, surfaced to the
-backend as the `WaitRepairSlotsAfterAnchor` module option. A value of zero or
-less disables the pass.
+`kSlotsToMovePastAnchor` is a pass argument defaulting to one. A value of zero or
+less disables the pass. It is not a module option: `Gfx1250Backend` sets it from a
+local `waitRepairSlotsAfterAnchor` at the call site, and `stinkytofu-opt` accepts
+`--WaitAwareScheduleRepairPass=kSlotsToMovePastAnchor=<n>`.
 
 `kPreferMemProducerFirst` is a build-time `constexpr bool` in
 `WaitAnchoredReadyQueue.hpp`, currently true. It decides only the order in which
