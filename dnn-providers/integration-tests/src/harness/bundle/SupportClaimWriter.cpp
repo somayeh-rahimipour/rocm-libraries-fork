@@ -173,18 +173,16 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
         target.observations.push_back(observation);
     }
 
-    // A sidecar with no observations is never a key here, so the RFC §9.2
-    // empty-write guard needs no explicit check: an absent observation set
-    // cannot reach the file, let alone null a claim in it.
     for(const auto& [sidecarPath, target] : targetsBySidecarPath)
     {
         const auto& fileObservations = target.observations;
+        const bool fileExisted = std::filesystem::exists(sidecarPath);
 
         if(target.isSweep)
         {
             SweepSupportClaims existing;
             existing.version = 1;
-            if(std::filesystem::exists(sidecarPath))
+            if(fileExisted)
             {
                 auto loaded = loadSweepSupportClaims(sidecarPath.parent_path());
                 if(loaded.has_value())
@@ -236,6 +234,13 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
             }
 
             const auto regrouped = regroupSweepClaims(flat, existing.version);
+
+            if(!fileExisted && regrouped.claims.empty())
+            {
+                ++summary.filesSkipped;
+                continue;
+            }
+
             const auto jsonContent = dumpCanonical(toJson(regrouped));
             writeIfChanged(sidecarPath, jsonContent, summary);
         }
@@ -243,7 +248,7 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
         {
             SupportClaims existing;
             existing.version = 1;
-            if(std::filesystem::exists(sidecarPath))
+            if(fileExisted)
             {
                 std::ifstream existingFile(sidecarPath);
                 if(existingFile)
@@ -261,6 +266,12 @@ WriteSummary writeObservedSupportClaims(const std::vector<SupportObservation>& o
             {
                 overlaySingleGraphCell(
                     existing, obs.engineName, obs.arch, obs.platform, obs.engineIsSupported);
+            }
+
+            if(!fileExisted && existing.claims.empty())
+            {
+                ++summary.filesSkipped;
+                continue;
             }
 
             const auto jsonContent = dumpCanonical(toJson(existing));
