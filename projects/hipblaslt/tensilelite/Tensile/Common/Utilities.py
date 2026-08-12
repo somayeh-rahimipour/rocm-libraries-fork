@@ -438,3 +438,55 @@ def wmmaV3InputVgprLayout(wmma: Sequence[int], dtypeBitWidth: Optional[int] = No
         assert False, f"Unsupported datatype bitwidth: {dtypeBitWidth}"
     else:
         assert False, f"Unhandled WMMA: {wmma}"
+
+# Bytes moved by one buffer_load_dwordx4, the widest global load we issue.
+SWIZZLE_LOAD_BYTES = 16
+
+def swizzleGeometry(solution, tc: str) -> dict:
+    """Layout of the pre-swizzled (pre-tiled) tensor `tc` ("A" or "B").
+
+    The pre-tiled tensor is a sequence of swizzle blocks. A block holds MI_{M|N} rows by
+    swizzleK unroll elements and is exactly what one wave reads with one global load: it
+    is stored as kGroups groups of MI_{M|N} rows, each row contributing laneSize
+    contiguous unroll elements, so every lane gets one buffer_load_dwordx4.
+
+    `dupFactor` is 2 on architectures whose matrix instruction replicates its operands
+    across the wavefront (gfx10/gfx11 WMMA supply MIInputPerThread = MatrixInstK rather
+    than M*K*B/wavefrontSize). There the wave holds two copies of the operand, so a block
+    needs only half the lanes and the upper half re-reads the same addresses. MFMA and
+    gfx12 WMMA give 1.
+
+    A lane's full matrix-instruction operand spans miOperand elements, which is
+    laneSize when dupFactor is 1 and may be a multiple of it otherwise (fp16 on gfx11
+    wants 16 elements = 32 bytes per lane). The extra elements sit in the next block
+    along the unroll dimension, so they are picked up by the ordinary NumLoadsCoalesced
+    walk rather than needing a wider load.
+
+    `solution` may be a partly derived solution state; only MIInputPerThread{tc},
+    MatrixInst{M,N,K}, WavefrontSize and ProblemType.DataType{tc} are read.
+    """
+    bpe       = int(solution["ProblemType"][f"DataType{tc}"].numBytes())
+    miInput   = solution[f"MIInputPerThread{tc}"]
+    miMorN    = solution["MatrixInstM"] if tc == "A" else solution["MatrixInstN"]
+    # Pack several MI steps into one load when a single operand is narrower than a
+    # dwordx4; a lane always moves exactly SWIZZLE_LOAD_BYTES bytes per load.
+    packK     = max(1, SWIZZLE_LOAD_BYTES // miInput // bpe)
+    miOperand = miInput * packK
+    laneSize  = min(miOperand, SWIZZLE_LOAD_BYTES // bpe)
+    # Distinct elements the instruction consumes vs. elements the wave holds.
+    dupFactor  = max(1, (solution["WavefrontSize"] * miInput) // (miMorN * solution["MatrixInstK"]))
+    lanesUsed  = solution["WavefrontSize"] // dupFactor
+    kGroups    = max(1, lanesUsed // miMorN)
+    swizzleK   = kGroups * laneSize
+    return {
+        "packK":        packK,
+        "miOperand":    miOperand,
+        "laneSize":     laneSize,
+        "kGroups":      kGroups,
+        "swizzleK":     swizzleK,
+        "blockElems":   miMorN * swizzleK,
+        "lanesUsed":    lanesUsed,
+        "dupFactor":    dupFactor,
+        "grvw":         laneSize,
+        "loadsPerLane": miOperand // laneSize,
+    }
