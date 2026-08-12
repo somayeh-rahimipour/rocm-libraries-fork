@@ -400,7 +400,11 @@ globalParameters["StinkyTofuEnableRemarks"] = False
 # StinkyTofuModule.setOutputDir (see KernelWriter._convertToStinkyTofu).
 globalParameters["StinkyTofuCostOutputDir"] = ""
 
-globalParameters["DisableSTWaitCnt"] = True
+# Epilogue store-sink experiment (gfx1250): sink global-write buffer_stores as
+# late as legal so InsertWaitAlu emits graduated va_vdst(N) instead of va_vdst(0).
+globalParameters["StinkyTofuEnableEpilogueSink"] = True
+
+globalParameters["DisableSTWaitCnt"] = False
 
 # Internal plumbing for the --cpu-only CLI switch (see Tensile.py addCommonArguments).
 # When True, the benchmark flow runs GPU-less: ISA is spoofed, the GPU clock-frequency

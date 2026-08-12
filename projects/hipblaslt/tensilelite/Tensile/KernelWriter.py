@@ -6792,6 +6792,9 @@ class KernelWriter(metaclass=abc.ABCMeta):
                                # True: expert scheduling mode2; False: mode 0. Independent of ScheduleIterAlg/OptLevel.
                                "EnableESM2": kernel["EnableStinkyTofuESM2"],
                                "EnableESM2TrackValuVsrc": kernel["EnableESM2TrackValuVsrc"],
+                               # Epilogue store-sink experiment (gfx1250): sink global-write stores
+                               # so InsertWaitAlu emits graduated va_vdst(N). Off by default.
+                               "EnableEpilogueSink": bool(globalParameters.get("StinkyTofuEnableEpilogueSink") or False),
                                "TileA0": kernel["ThreadTile0"],
                                "TileB0": kernel["ThreadTile1"],
                                "TileM0": kernel["MacroTile0"],
