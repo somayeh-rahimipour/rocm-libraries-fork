@@ -9,6 +9,11 @@ rocBLAS documentation is available at
 
 * Level 3 grouped batched GEMM functions `rocblas_sgemm_grouped_batched`, `rocblas_dgemm_grouped_batched`, and `rocblas_gemm_grouped_batched_ex` for both C and FORTRAN, including ILP64 API (`_64` name suffix).
 
+### Resolved issues
+
+* Fix `ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH` ignoring the solution indices reported by `rocblas_gemm_ex_get_solutions` and `rocblas-gemm-tune`. Tensile solutions are reported as negative indices and were previously discarded when loading an override file, leaving the default kernel selection in place. Raw positive Tensile indices in existing override files are still honored after fix.
+* Fix `rocblas-gemm-tune` skipped best solution reporting when it came from the Tensile backend.
+
 ## rocBLAS 5.6.0
 
 ### Added
