@@ -37,8 +37,11 @@ hand to another developer.
 A slice is one bounded mutation run against a selected source module and test
 set.
 
-1. **Choose one target module.** Keep the slice small enough to explain and
-   count independently.
+1. **Define and validate the slice.** Read
+   [references/slice-planning.md](references/slice-planning.md). Record the
+   source-code version, target module, selected tests, container, maximum
+   workers, and output directory before editing configuration. Keep the slice
+   small enough to explain and count independently.
 2. **Choose and validate the covering tests.** Read
    [references/covering-set.md](references/covering-set.md). Stop unless pytest
    succeeds and the coverage report shows that the selected tests execute the
