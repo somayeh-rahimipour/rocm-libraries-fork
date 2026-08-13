@@ -4314,12 +4314,6 @@ namespace TensileLite
         if(!problem.getParams().uniformSummationOrder())
             return true;
 
-        // Conservative simplification: a custom kernel is hand-written assembly
-        // whose summation order is not described by sizeMapping, so none are
-        // admitted. Admitting provably-safe custom kernels is planned separately.
-        if(!sizeMapping.customKernelName.empty())
-            return false;
-
         // Atomic fixup of partial tiles accumulates in arrival order.
         if(sizeMapping.streamK != 0 && sizeMapping.streamKAtomic != 0)
             return false;
@@ -4341,6 +4335,10 @@ namespace TensileLite
 
         // A kernel with no runtime StaggerU field never sees the clamp in
         // calculateAutoStaggerU() and would stagger with its compiled-in value.
+        // This is also what decides custom kernels: one is admissible exactly
+        // when the clamp can reach it, and its declared StaggerU metadata is
+        // validated against its disassembly by
+        // Tensile/Tests/unit/test_custom_kernel_staggeru_metadata.py.
         if(!internalArgsSupport.staggerU && sizeMapping.staggerU != 0)
             return false;
 
@@ -4362,13 +4360,6 @@ namespace TensileLite
                 "hipBLASLt Error: solution '" + this->kernelName
                 + "' cannot guarantee uniform summation order for this launch: " + reason);
         };
-
-        // Conservative simplification: a custom kernel is hand-written assembly
-        // whose summation order is not described by sizeMapping, so none are
-        // admitted. Admitting provably-safe custom kernels is planned separately.
-        if(!sizeMapping.customKernelName.empty())
-            reject("custom kernel " + sizeMapping.customKernelName
-                   + " is not supported under uniform summation order");
 
         if(sizeMapping.streamK != 0)
         {
