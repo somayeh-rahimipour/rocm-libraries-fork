@@ -88,6 +88,12 @@ set.
     restoration result. Keep mutmut's original statuses separate from review
     decisions. Do not improve a score by hiding unresolved results.
 
+13. **Compare reports only when their inputs are compatible.** Read
+    [references/regression-comparison.md](references/regression-comparison.md).
+    Require nonempty, unique mutant identities and explicit decisions for
+    missing or new mutants. Do not claim that comparison blocks automated
+    GitHub checks until the repository has both a standard report generator and
+    a workflow that uses the comparison.
 ## Guardrails
 
 - Apply a mutant and restore source in one serial process.
