@@ -63,10 +63,11 @@ set.
    complete set of mutant IDs before grouping work. Inspect each mutant with
    `mutmut show`, and keep exactly one review row for every ID. Keep survived,
    no-test, timeout, and tool-failure results separate.
-8. **Add tests that distinguish the changed behavior.** For every proposed
-   assertion, state which source change makes it fail. Do not add assertions
-   only to increase coverage, silently skip tests, or assert behavior that the
-   current source does not implement.
+8. **Add tests that distinguish the changed behavior.** Read
+   [references/test-authoring.md](references/test-authoring.md). For every
+   proposed assertion, state which source change makes it fail. Do not add
+   assertions only to increase coverage, silently skip tests, or assert
+   behavior that the current source does not implement.
 9. **Verify every claimed kill.** Rerun the named mutant with one worker. When
    a manifest is available, use `mutmut-verify.sh`. Count the mutant as killed
    only when the test passes on unchanged source, fails with pytest assertion
