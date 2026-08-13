@@ -58,9 +58,11 @@ set.
    unless the reviewed slice requires a lower value. Record the command,
    source-code version, container image, mutmut version, exit status, and
    result counts.
-7. **Inspect every result that was not killed.** Use `mutmut results`,
-   `mutmut show`, and `mutmut tests-for-mutant`. Keep survived, no-test,
-   timeout, and tool-failure results separate.
+7. **Review every result that was not killed.** Read
+   [references/survivor-triage.md](references/survivor-triage.md). Save the
+   complete set of mutant IDs before grouping work. Inspect each mutant with
+   `mutmut show`, and keep exactly one review row for every ID. Keep survived,
+   no-test, timeout, and tool-failure results separate.
 8. **Add tests that distinguish the changed behavior.** For every proposed
    assertion, state which source change makes it fail. Do not add assertions
    only to increase coverage, silently skip tests, or assert behavior that the
@@ -84,6 +86,7 @@ set.
 ## Guardrails
 
 - Apply a mutant and restore source in one serial process.
+- Keep exactly one review row for every mutant before reporting results.
 - Never use the package `TOTAL` coverage row as proof for one target file.
 - Never accept coverage from a failed pytest run.
 - Never replace an unproven focused test set with the full unit suite without
