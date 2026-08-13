@@ -230,28 +230,8 @@ void IntegrationBundleVerificationHarness::enforceAtLevel(EnforcementLevel level
     ASSERT_TRUE(result.is_good()) << "[rung=buildable] " << result.get_message();
 }
 
-void IntegrationBundleVerificationHarness::observeSupportOnly()
+void IntegrationBundleVerificationHarness::recordSupportObservations()
 {
-    auto handle = getSharedHandle();
-
-    const std::vector<uint8_t> graphBytes(
-        _bundle->graphBuffer.data(), _bundle->graphBuffer.data() + _bundle->graphBuffer.size());
-
-    hipdnn_frontend::graph::Graph graph;
-    auto err = graph.from_binary(handle, graphBytes);
-    if(err.is_bad())
-    {
-        return;
-    }
-
-    std::vector<int64_t> engineIds;
-    auto status = graph.get_ranked_engine_ids(engineIds);
-
-    if(!isResolved(status.get_code()))
-    {
-        return;
-    }
-
     auto engines = LoadedEngineTable::get().all();
     if(TestConfig::get().hasEngineName())
     {
@@ -264,6 +244,41 @@ void IntegrationBundleVerificationHarness::observeSupportOnly()
 
     const std::string arch = baseArchToken(TestConfig::get().getCurrentArch());
     const std::string platform = currentPlatform();
+    const EnforcementLevel level = _bundle->metadata.enforcementLevel;
+
+    // Every exit below records one row per engine, UNKNOWN included. A cell
+    // that silently dropped out of the log would be indistinguishable from one
+    // a shard never reached, and telling those two apart is the entire job of
+    // the harvest coverage report.
+    const auto recordAll = [&](ObservedSupport support) {
+        for(const auto& engine : engines)
+        {
+            SupportObservationLog::get().record(
+                {_claimLocator, engine.name, arch, platform, support, level});
+        }
+    };
+
+    auto handle = getSharedHandle();
+
+    const std::vector<uint8_t> graphBytes(
+        _bundle->graphBuffer.data(), _bundle->graphBuffer.data() + _bundle->graphBuffer.size());
+
+    hipdnn_frontend::graph::Graph graph;
+    auto err = graph.from_binary(handle, graphBytes);
+    if(err.is_bad())
+    {
+        recordAll(ObservedSupport::UNKNOWN);
+        return;
+    }
+
+    std::vector<int64_t> engineIds;
+    auto status = graph.get_ranked_engine_ids(engineIds);
+
+    if(!isResolved(status.get_code()))
+    {
+        recordAll(ObservedSupport::UNKNOWN);
+        return;
+    }
 
     for(const auto& engine : engines)
     {
@@ -271,7 +286,29 @@ void IntegrationBundleVerificationHarness::observeSupportOnly()
             = std::find(engineIds.begin(), engineIds.end(), engine.id) != engineIds.end();
 
         SupportObservationLog::get().record(
-            {_claimLocator, engine.name, arch, platform, engineIsSupported});
+            {_claimLocator,
+             engine.name,
+             arch,
+             platform,
+             engineIsSupported ? ObservedSupport::SUPPORTED : ObservedSupport::DECLINED,
+             level});
+    }
+}
+
+void IntegrationBundleVerificationHarness::recordSupportObservationsQuietly()
+{
+    try
+    {
+        recordSupportObservations();
+    }
+    catch(const std::exception& e)
+    {
+        HIPDNN_SDK_LOG_WARN("Support observation skipped for " << _claimLocator.diagnosticPath
+                                                               << ": " << e.what());
+    }
+    catch(...)
+    {
+        HIPDNN_SDK_LOG_WARN("Support observation skipped for " << _claimLocator.diagnosticPath);
     }
 }
 
@@ -279,8 +316,17 @@ void IntegrationBundleVerificationHarness::runComparison()
 {
     if(TestConfig::get().writeSupportClaims())
     {
-        observeSupportOnly();
+        recordSupportObservations();
         return;
+    }
+
+    // Harvest observes and then gets out of the way: the test runs to whatever
+    // verdict it would have reached anyway (RFC 0015 §12.1). Hence no early
+    // return here, and hence the try/catch — a failed query costs a JSONL line,
+    // never a red test.
+    if(TestConfig::get().hasSupportObservationsPath())
+    {
+        recordSupportObservationsQuietly();
     }
 
     if(TestConfig::get().enforceSupportClaims()
