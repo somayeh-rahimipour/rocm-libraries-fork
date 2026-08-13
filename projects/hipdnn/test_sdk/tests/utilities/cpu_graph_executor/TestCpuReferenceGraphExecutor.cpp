@@ -35,6 +35,7 @@
 #include <hipdnn_data_sdk/utilities/TensorView.hpp>
 #include <hipdnn_flatbuffers_sdk/data_objects/serialized_graph_and_plan_generated.h>
 #include <hipdnn_flatbuffers_sdk/flatbuffer_utilities/GraphWrapper.hpp>
+#include <hipdnn_test_sdk/utilities/CpuFpReferenceResampleBwd.hpp>
 #include <hipdnn_test_sdk/utilities/CpuFpReferenceResampleFwd.hpp>
 #include <hipdnn_test_sdk/utilities/CpuFpReferenceValidation.hpp>
 #include <hipdnn_test_sdk/utilities/FlatbufferGraphTestUtils.hpp>
@@ -445,6 +446,64 @@ public:
         }
     }
 
+    static void runResampleBwdTest(hipdnn_flatbuffers_sdk::data_objects::ResampleMode resampleMode)
+    {
+        auto builder = createValidResampleBwdGraph(true, resampleMode);
+        const GraphWrapper graphWrapper(builder.GetBufferPointer(), builder.GetSize());
+
+        Tensor<float> dyTensor({1, 1, 2, 2});
+        Tensor<float> directDyTensor({1, 1, 2, 2});
+        Tensor<float> dxTensor({1, 1, 4, 4});
+        Tensor<float> directDxTensor({1, 1, 4, 4});
+
+        for(size_t i = 0; i < dyTensor.elementCount(); ++i)
+        {
+            const auto val = static_cast<float>(i + 1);
+            dyTensor.memory().hostData()[i] = val;
+            directDyTensor.memory().hostData()[i] = val;
+        }
+        dyTensor.memory().markHostModified();
+        directDyTensor.memory().markHostModified();
+
+        Tensor<int32_t> indexTensor({1, 1, 2, 2});
+        Tensor<int32_t> directIndexTensor({1, 1, 2, 2});
+
+        const std::unordered_map<int64_t, void*> variantPack{{1, dyTensor.memory().hostData()},
+                                                             {2, dxTensor.memory().hostData()},
+                                                             {3, indexTensor.memory().hostData()}};
+
+        if(resampleMode == hipdnn_flatbuffers_sdk::data_objects::ResampleMode::MAXPOOL)
+        {
+            // maxpool indices with a 2x2 window on a 4x4 input of linear elements
+            const std::vector<int32_t> sampleIndices = {5, 7, 13, 15};
+            for(size_t i = 0; i < sampleIndices.size(); ++i)
+            {
+                indexTensor.memory().hostData()[i] = sampleIndices[i];
+                directIndexTensor.memory().hostData()[i] = sampleIndices[i];
+            }
+
+            indexTensor.memory().markHostModified();
+            directIndexTensor.memory().markHostModified();
+
+            // variantPack[3] = indexTensor.memory().hostData();
+        }
+
+        CpuReferenceGraphExecutor().execute(
+            builder.GetBufferPointer(), builder.GetSize(), variantPack);
+
+        CpuFpReferenceResampleBwd::backward<float>(directDyTensor,
+                                                   directDxTensor,
+                                                   {0, 0},
+                                                   {2, 2},
+                                                   {2, 2},
+                                                   resampleMode,
+                                                   PaddingMode::ZERO_PAD,
+                                                   &directIndexTensor);
+
+        const CpuFpReferenceValidation<float> validator(0.0f, 0.0f);
+        EXPECT_TRUE(validator.allClose(directDxTensor, dxTensor));
+    }
+
 #ifdef HIPDNN_ENABLE_SDPA
     template <typename InputType>
     static void runSdpaTest(hipdnn_flatbuffers_sdk::data_objects::DataType dataType)
@@ -776,6 +835,24 @@ TEST(TestCpuReferenceGraphExecutor, ResampleFwdAllFloats)
 TEST(TestCpuReferenceGraphExecutor, ResampleFwdWithIndexAllFloats)
 {
     TestCpuReferenceGraphExecutor::runResampleFwdTest(true);
+}
+
+TEST(TestCpuReferenceGraphExecutor, ResampleBwdMaxpool)
+{
+    TestCpuReferenceGraphExecutor::runResampleBwdTest(
+        hipdnn_flatbuffers_sdk::data_objects::ResampleMode::MAXPOOL);
+}
+
+TEST(TestCpuReferenceGraphExecutor, ResampleBwdAvgExcludePadding)
+{
+    TestCpuReferenceGraphExecutor::runResampleBwdTest(
+        hipdnn_flatbuffers_sdk::data_objects::ResampleMode::AVGPOOL_EXCLUDE_PADDING);
+}
+
+TEST(TestCpuReferenceGraphExecutor, ResampleBwdAvgIncludePadding)
+{
+    TestCpuReferenceGraphExecutor::runResampleBwdTest(
+        hipdnn_flatbuffers_sdk::data_objects::ResampleMode::AVGPOOL_INCLUDE_PADDING);
 }
 
 #ifdef HIPDNN_ENABLE_SDPA
