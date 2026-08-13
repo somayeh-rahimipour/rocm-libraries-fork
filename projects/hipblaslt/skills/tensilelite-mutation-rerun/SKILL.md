@@ -82,10 +82,11 @@ set.
 11. **Restore files after every outcome.** Run `pyproject-mutmut.sh restore`
     and `assert-clean`. Confirm that no temporary source change remains after
     success, failure, or interruption.
-12. **Write the handoff.** Report the target, exact test selection,
-    source-code version, environment, unchanged-source result, complete result
-    counts, tests added, remaining risks, and evidence paths. Do not improve a
-    score by hiding timeouts, tool failures, or other unresolved results.
+12. **Write the report and handoff.** Read
+    [references/reporting.md](references/reporting.md). Build the report from
+    saved mutmut output, the complete review table, verifier output, and the
+    restoration result. Keep mutmut's original statuses separate from review
+    decisions. Do not improve a score by hiding unresolved results.
 
 ## Guardrails
 
