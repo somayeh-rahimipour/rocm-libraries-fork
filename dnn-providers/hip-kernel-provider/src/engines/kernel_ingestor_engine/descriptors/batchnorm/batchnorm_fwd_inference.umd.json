@@ -1,0 +1,9 @@
+// The single-node fwd-inference discriminator: one BatchnormInferenceAttributes node,
+// and its tensor configuration passes the existing validator.
+{
+  "version": "1.0",
+  "id": "c82eb379-e7de-56c7-b96e-651829b98e2a",
+  "name": "BatchnormFwdInference",
+  "scope": "graph",
+  "match_symbol": "hipkernel.batchnorm.fwd_inference_match"
+}

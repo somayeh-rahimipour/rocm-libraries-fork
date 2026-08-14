@@ -1,0 +1,8 @@
+// Everything that makes a graph servable at all: one SDPA backward node, no dropout, no alibi/padding mask, no attn-mask/seed/offset/dropout-mask/dbias tensors, batch mode (not group), rank-4 operands of one shared dtype (bf16 or fp16), symmetric head dims in {64, 128, 192}, FP32 stats, an integral GQA ratio, and byte strides that fit every kernarg's uint32 fields for both the default (a32, most demanding) accumulator path and the dq_acc buffer it needs.
+{
+  "version": "1.0",
+  "id": "d120ed7a-2c14-556a-96a3-55269f1e1c00",
+  "name": "SingleNodeSdpaBackward",
+  "scope": "graph",
+  "match_symbol": "hipkernel.asm_sdpa_bwd.graph_match"
+}

@@ -1,0 +1,10 @@
+// The two-node fused discriminator: fwd training followed by a pointwise activation
+// node, checked by the existing training-fusion validator (RELU family only, no leaky
+// slope).
+{
+  "version": "1.0",
+  "id": "b46592f7-a229-5b64-bdea-11e7e33963a6",
+  "name": "BatchnormFwdTrainingActivation",
+  "scope": "graph",
+  "match_symbol": "hipkernel.batchnorm.fwd_training_activation_match"
+}

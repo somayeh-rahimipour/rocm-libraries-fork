@@ -1,0 +1,9 @@
+// The single-node backward discriminator: one BatchnormBackwardAttributes node with no
+// peer statistics, validated by the existing backward checker.
+{
+  "version": "1.0",
+  "id": "da81113f-98dc-553c-a36a-bf69abb8be44",
+  "name": "BatchnormBwd",
+  "scope": "graph",
+  "match_symbol": "hipkernel.batchnorm.bwd_match"
+}

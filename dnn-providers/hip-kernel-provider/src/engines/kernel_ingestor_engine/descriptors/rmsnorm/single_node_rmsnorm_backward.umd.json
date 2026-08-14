@@ -1,0 +1,10 @@
+// One RMSnorm backward node, fp32 compute, no override shapes, and a tensor
+// configuration the validator accepts. Symmetric with the forward matcher, over the
+// backward attributes and validator instead.
+{
+  "version": "1.0",
+  "id": "7d679612-99bf-513b-b601-797b953a5023",
+  "name": "SingleNodeRMSnormBackward",
+  "scope": "graph",
+  "match_symbol": "hipkernel.rmsnorm_bwd.graph_match"
+}

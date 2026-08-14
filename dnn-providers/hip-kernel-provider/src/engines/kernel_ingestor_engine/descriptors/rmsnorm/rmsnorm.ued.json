@@ -1,0 +1,17 @@
+// The RMSnorm engine: one engine id serving the forward and backward packs. The two
+// share one KMD (both are empty: neither has a kernel variant to key on) and one UHD
+// (a single-kernel pack has nothing to rank either way), so splitting them into two
+// engines would duplicate an identical heuristic and schema for no reason -- the
+// Pointwise add/mul shape, not the Pointwise/PointwiseSub one.
+{
+  "version": "1.0",
+  "id": "67e83ac7-6d91-57cb-b330-a5a565d92bfa",
+  "name": "hipkernel:RMSnorm",
+  "sdk_version": "1.2.0",
+  "heuristic": "d0cd32c5-cf5b-5b6b-866b-fbea433adc57",
+  "metadata": "feabc38b-0fa7-5f70-85d5-dce8d77bc203",
+  "knobs": [],
+  "behavior_notes": [
+    "runtime_compilation"
+  ]
+}

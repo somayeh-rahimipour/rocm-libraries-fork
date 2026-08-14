@@ -1,0 +1,14 @@
+// Deliberately empty. Each pack has exactly one kernel, and its block size, and its
+// outer, inner and stride extents are computed from the graph's dims and stride order
+// at plan build, so no field here would key anything.
+{
+  "version": "1.0",
+  "id": "feabc38b-0fa7-5f70-85d5-dce8d77bc203",
+  "name": "RMSnormVariantFields",
+  "fields": [
+    {
+      "name": "direction",
+      "type": "string"
+    }
+  ]
+}

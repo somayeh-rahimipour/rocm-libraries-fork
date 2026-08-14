@@ -1,0 +1,8 @@
+// Everything that makes a graph servable at all: one SDPA node, no dropout, no alibi or padding mask, no attention-mask or paged-KV tensors, no stats output, rank-4 operands of one dtype, and byte strides that fit the kernarg's uint32 fields.
+{
+  "version": "1.0",
+  "id": "8fe5055c-9f34-5b60-a121-ce64a5758935",
+  "name": "SingleNodeSdpaForward",
+  "scope": "graph",
+  "match_symbol": "hipkernel.asm_sdpa_fwd.graph_match"
+}

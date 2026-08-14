@@ -1,0 +1,8 @@
+// One resample node, fp32 compute, over a tensor configuration the validator accepts. There is no kernel-scoped matcher: with one kernel and an empty metadata schema there is nothing left to prune on.
+{
+  "version": "1.0",
+  "id": "74828fe4-f250-50ac-949f-06ace06505d3",
+  "name": "SingleNodeResample",
+  "scope": "graph",
+  "match_symbol": "hipkernel.resample_fwd.graph_match"
+}

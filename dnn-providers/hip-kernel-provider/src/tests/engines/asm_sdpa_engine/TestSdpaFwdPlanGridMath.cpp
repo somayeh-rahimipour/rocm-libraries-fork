@@ -118,6 +118,26 @@ TEST(TestSdpaFwdPlanGridMath, WindowGenericMaskAlsoHalvesGridDimX)
     EXPECT_EQ(lp.gridDimX, 4U);
 }
 
+TEST(TestSdpaFwdPlanGridMath, Hd192x128NeedsTheBaseArchIdentifier)
+{
+    // archString is compared for equality against a bare "gfx942", so a caller that
+    // passes a device's raw gcnArchName -- which carries a target-id suffix -- loses the
+    // hd192x128 path entirely and launches the wrong geometry with no error anywhere.
+    // Every other test here hands over an already-stripped string, which is how that
+    // went unnoticed until an MI300X ran it.
+    auto p = makeHd192x128Params();
+    p.archString = "gfx942:sramecc+:xnack-";
+
+    const auto lp = computeFwdLaunchParams(p);
+
+    // The stripped-name expectations from Hd192x128SwapsGridDimXY. Matching them is the
+    // claim: the suffix must not change the launch.
+    EXPECT_EQ(lp.gridDimX, 16U);
+    EXPECT_EQ(lp.gridDimY, 16U);
+    EXPECT_EQ(lp.blockDimX, 256U);
+    EXPECT_EQ(lp.tuneOpt, 0U);
+}
+
 TEST(TestSdpaFwdPlanGridMath, Hd192x128SwapsGridDimXY)
 {
     auto p = makeHd192x128Params();

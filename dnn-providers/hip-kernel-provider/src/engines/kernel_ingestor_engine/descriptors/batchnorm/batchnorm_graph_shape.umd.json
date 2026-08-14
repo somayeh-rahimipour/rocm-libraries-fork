@@ -1,0 +1,11 @@
+// Everything that makes a graph servable by this engine at all, regardless of which
+// variant: no override shapes, every node's compute in fp32, and a real device to
+// compile against. Every pack lists it, so it runs once per (graph, device) and every
+// pack's own matcher reuses the memoized verdict.
+{
+  "version": "1.0",
+  "id": "a215ab66-9484-555c-80b5-09292965a504",
+  "name": "BatchnormGraphShape",
+  "scope": "graph",
+  "match_symbol": "hipkernel.batchnorm.graph_shape_match"
+}

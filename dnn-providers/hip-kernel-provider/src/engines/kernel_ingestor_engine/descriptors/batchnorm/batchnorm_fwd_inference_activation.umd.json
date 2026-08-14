@@ -1,0 +1,10 @@
+// The two-node fused discriminator: fwd inference followed by a pointwise activation
+// node, with the fusion's tensor wiring and activation mode checked by the existing
+// fusion validator.
+{
+  "version": "1.0",
+  "id": "625efd92-e183-58e4-b85b-ca6612ab4883",
+  "name": "BatchnormFwdInferenceActivation",
+  "scope": "graph",
+  "match_symbol": "hipkernel.batchnorm.fwd_inference_activation_match"
+}

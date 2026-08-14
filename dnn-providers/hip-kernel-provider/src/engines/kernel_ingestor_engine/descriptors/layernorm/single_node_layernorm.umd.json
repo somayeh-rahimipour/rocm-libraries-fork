@@ -1,0 +1,8 @@
+// One layernorm node, fp32 compute, no override shapes, and a tensor configuration the validator accepts. There is no kernel-scoped matcher: with one kernel and an empty metadata schema there is nothing left to prune on.
+{
+  "version": "1.0",
+  "id": "160a81ce-2606-5c84-9a79-d2d61c89db31",
+  "name": "SingleNodeLayernorm",
+  "scope": "graph",
+  "match_symbol": "hipkernel.layernorm_fwd.graph_match"
+}
