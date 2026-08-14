@@ -723,17 +723,21 @@ inline DispatchDescriptor parseDispatchDescriptor(const nlohmann::json& root)
 inline KernelSource parseKernelSource(const nlohmann::json& root, const std::string& where)
 {
     requireObject(root, where);
-    requireOnlyKeys(root, {"kind", "source_file", "entry_point"}, where);
+    requireOnlyKeys(
+        root,
+        {"kind", "source_file", "entry_point", "code_object_file", "code_object_symbol"},
+        where);
 
     KernelSource source;
     const std::string kindText = requireString(root, "kind", where);
     source.kind = kernelSourceKindFromString(kindText, where);
-    // Only EMBEDDED_SOURCE has an implementation the dispatch handler can call, and that
-    // handler never inspects source.kind -- so accepting another kind here would let
-    // applicability advertise a kernel that throws inside getKernelSrc("") at
-    // plan-build time instead of failing cleanly at load.
-    if(source.kind == KernelSourceKind::EMBEDDED_SOURCE)
+    // A kind is accepted only where a dispatch handler can act on it. The handler reads
+    // the fields its kind names and never inspects source.kind, so accepting a kind with
+    // no adapter would let applicability advertise a kernel that throws at plan-build
+    // time instead of failing cleanly at load.
+    switch(source.kind)
     {
+    case KernelSourceKind::EMBEDDED_SOURCE:
         // Not cross-checked against the provider's embedded kernel map: that map is
         // provider-specific with no plugin_sdk-level registry to check against. A
         // typo'd source_file/entry_point reaches getKernelSrc() and throws at
@@ -742,11 +746,19 @@ inline KernelSource parseKernelSource(const nlohmann::json& root, const std::str
         // closed here without a provider-populated registry to query.
         source.sourceFile = requireString(root, "source_file", where);
         source.entryPoint = requireString(root, "entry_point", where);
-    }
-    else
-    {
+        break;
+    case KernelSourceKind::HSACO_FILE:
+        // Same caveat: the path is resolved by the provider's dispatch handler against a
+        // root only it knows, so a wrong path is a plan-build failure rather than a load
+        // one. A provider whose kernels are prebuilt is expected to test that its
+        // descriptors name files that exist.
+        source.codeObjectFile = requireString(root, "code_object_file", where);
+        source.codeObjectSymbol = requireString(root, "code_object_symbol", where);
+        break;
+    default:
         fail("kernel source kind '" + kindText + "' in " + where
-             + " has no implementation yet; only 'embedded_source' can be dispatched");
+             + " has no implementation yet; only 'embedded_source' and 'hsaco_file' can be "
+               "dispatched");
     }
     return source;
 }
