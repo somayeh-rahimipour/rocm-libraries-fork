@@ -219,6 +219,22 @@ def _getName(state, requiredParameters: frozenset, splitGSU: bool, ignoreInterna
   if state.get("LDSSegmentInterleave") == 1:
     requiredParametersTemp.add("LDSSegmentInterleave")
 
+  # DQuantSize0/1 are only meaningful when a quant epilogue is active; exclude
+  # them from non-quant kernel names to avoid spurious -1 tags on every other kernel.
+  if state.get("DQuantType", "None") == "None":
+    requiredParametersTemp.discard("DQuantSize0")
+    requiredParametersTemp.discard("DQuantSize1")
+
+  # DeepseekScale parameters are only meaningful when at least one scale flag is active.
+  use_scale_a = state.get("UseDeepseekScaleA", False)
+  use_scale_b = state.get("UseDeepseekScaleB", False)
+  if not use_scale_a:
+    requiredParametersTemp.discard("UseDeepseekScaleA")
+  if not use_scale_b:
+    requiredParametersTemp.discard("UseDeepseekScaleB")
+  if not use_scale_a and not use_scale_b:
+    requiredParametersTemp.discard("DeepseekScaleBlockK")
+
   for key in sorted(requiredParametersTemp):
     if key not in state or key == "CustomKernelName":
       continue

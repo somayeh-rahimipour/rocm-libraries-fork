@@ -227,6 +227,445 @@ def _validateSubtileGRKPartition(state, printRejectionReason):
   return True
 
 
+def _validateSubtileEpiloguePrereqs(state, printRejectionReason, epilogueName):
+  """Validate the shared prerequisites for the Subtile fused epilogues.
+
+  The Subtile fused epilogues share these structural requirements: the Subtile
+  code path, gfx950, bf16/f16/fp8/bfp8 I/O, StreamKForceDPOnly (complete
+  tiles, no K-split fixup), and MIArchVgpr=False (the emitters use AGPR
+  read/write instructions). Returns True when all hold; rejects the solution
+  and returns False otherwise.
+  """
+  if not state["UseSubtileImpl"]:
+    reject(state, printRejectionReason, "%s requires UseSubtileImpl" % epilogueName)
+    return False
+  if state["ISA"] != (9, 5, 0):
+    reject(state, printRejectionReason, "%s is only implemented on gfx950" % epilogueName)
+    return False
+  dt = state["ProblemType"]["DataType"]
+  if not (dt.isBFloat16() or dt.isHalf() or dt.isAnyFloat8() or dt.isAnyBFloat8()):
+    reject(state, printRejectionReason,
+           "%s currently supports bf16, f16, fp8, and bfp8 data types only" % epilogueName)
+    return False
+  # StreamK-completeness: when StreamK is active, require full data-parallel
+  # tiles (no K-split fixup). Non-StreamK solutions are always complete-tile;
+  # assignDerivedParameters clears StreamKForceDPOnly for them, so only check
+  # when StreamK != 0. _validateStreamKForceDPOnly() enforces StreamK=3 next.
+  if state["StreamK"] and not state["StreamKForceDPOnly"]:
+    reject(state, printRejectionReason,
+           "%s requires StreamKForceDPOnly=1 (complete tiles, no K-split fixup)" % epilogueName)
+    return False
+  # MIArchVgpr=True places the D-tile in regular VGPRs, but the emitters use
+  # accvgpr() reads/writes. Reject until an AGPR-free code path exists.
+  if state["MIArchVgpr"]:
+    reject(state, printRejectionReason,
+           "%s requires MIArchVgpr=False (emitter uses AGPR read/write instructions)" % epilogueName)
+    return False
+  return True
+
+
+def _validatePartialRMS(state, printRejectionReason):
+  """Validate PartialRMS fused epilogue constraints.
+
+  PartialRMS (Phase 1 / K1) computes per-row Σx² from the GEMM accumulator
+  and writes it to a global partialBuf. It also applies gamma in-place so the
+  downstream store path writes D as bf16.
+
+  Structural requirements:
+    - UseSubtileImpl, gfx950, bf16, StreamKForceDPOnly.
+    - MacroTile0 and MacroTile1 must be multiples of 64.
+    - free0 = N_hidden (the reduced axis); free1 = M_tokens. Each WG reduces its
+      own MT0-wide free0 tile and writes one partial per token to
+      partialBuf[token, WorkGroup0].
+    - partialBuf is 2D row-major [M_padded, n_d], n_d = ceil(SizesFree0 / MT0)
+      columns (one column per free0 tile, i.e. per WorkGroup0). Byte offset for
+      (token, t) = (token * n_d + t) * 4.
+    - n_d is computed on device from SizesFree0; it is not a kernarg.
+    - OutputAmaxD and MBSK/AdaptiveGemmGSUA rejected (kernarg layout conflict).
+    - GroupedGemm rejected (multi-tile index arithmetic not validated).
+    - When wg_n > 1: wg_m must be power-of-two; LDS budget checked.
+    - PartialRMSQuant requires PartialRMS.
+  """
+  if state.get("PartialRMSResidualAdd", False) and not state.get("PartialRMS", False):
+    reject(state, printRejectionReason, "PartialRMSResidualAdd requires PartialRMS")
+    return
+  if state.get("PartialRMSQuant", False) and not state.get("PartialRMS", False):
+    reject(state, printRejectionReason, "PartialRMSQuant requires PartialRMS")
+    return
+  if not state.get("PartialRMS", False):
+    return
+  if not _validateSubtileEpiloguePrereqs(state, printRejectionReason, "PartialRMS"):
+    return
+  # The Subtile PAP path does not call papDtlSaveLdsBank, so LDS-bank alignment
+  # is broken on the next persistent tile. This corrupts the AGPR accumulators,
+  # which then produces out-of-bounds partialBuf stores that fault on a read-only
+  # page. Reject until PAP and PartialRMS are co-validated.
+  if state.get("PrefetchAcrossPersistent", 0):
+    reject(state, printRejectionReason,
+           "PartialRMS is not supported with PrefetchAcrossPersistent")
+    return
+  if state["MacroTile1"] <= 0:
+    reject(state, printRejectionReason, "PartialRMS requires a positive MacroTile1")
+    return
+  if state["ProblemType"]["OutputAmaxD"]:
+    reject(state, printRejectionReason,
+           "PartialRMS does not support OutputAmaxD (kernarg layout conflict)")
+    return
+  if (state.get("_GlobalAccumulation") == "MultipleBufferSingleKernel" or
+      state.get("AdaptiveGemmGSUA") == 1):
+    reject(state, printRejectionReason,
+           "PartialRMS does not support MultipleBufferSingleKernel/AdaptiveGemmGSUA "
+           "(kernarg layout conflict)")
+    return
+  if state["ProblemType"].get("GroupedGemm", False):
+    reject(state, printRejectionReason,
+           "PartialRMS does not support GroupedGemm")
+    return
+  wg = state["MIWaveGroup"]
+  mfma_n        = state["MatrixInstN"]
+
+  mt0 = state["MacroTile0"]
+  if mt0 <= 0 or mt0 % 64 != 0:
+    reject(state, printRejectionReason,
+           "PartialRMS requires MacroTile0 to be a multiple of 64")
+    return
+  mt1 = state["MacroTile1"]
+  if mt1 <= 0 or mt1 % 64 != 0:
+    reject(state, printRejectionReason,
+           "PartialRMS requires MacroTile1 to be a multiple of 64")
+    return
+  if (state["MacroTile0"] // (state["MatrixInstM"] * wg[0])) < 1:
+    reject(state, printRejectionReason,
+           "PartialRMS requires MacroTile0 // (MatrixInstM*MIWaveGroup[0]) >= 1")
+    return
+  if wg[0] > 1:
+    if (wg[0] & (wg[0] - 1)) != 0:
+      reject(state, printRejectionReason,
+             "PartialRMS cross-wave reduction requires MIWaveGroup[0] power of two")
+      return
+    mma_n = (state["MacroTile1"] // mfma_n) // wg[1]
+    ldsBytes = wg[0] * wg[1] * state["WavefrontSize"] * mma_n * 4
+    if state["MaxLDS"] > 0 and ldsBytes > state["MaxLDS"]:
+      reject(state, printRejectionReason,
+             "PartialRMS cross-wave LDS scratch (%u) exceeds MaxLDS (%u)"
+             % (ldsBytes, state["MaxLDS"]))
+      return
+
+
+def _resolveDQuantSize(state, printRejectionReason, label):
+  """Resolve and validate DQuantSize0/1; set _DQuantSize0/_DQuantSize1 in state.
+
+  Returns True on success, False if the state was rejected.
+  Checks power-of-two, even divisibility, and Phase-1 wave-span bounds.
+  The label argument ("TileQuant" or "MXFP8Quant") is used only in rejection messages.
+  """
+  mt0, mt1 = state["MacroTile0"], state["MacroTile1"]
+  q0raw = state.get("DQuantSize0", -1)
+  q1raw = state.get("DQuantSize1", -1)
+  q0 = mt0 if q0raw in (-1, 0) else q0raw
+  q1 = mt1 if q1raw in (-1, 0) else q1raw
+  state["_DQuantSize0"], state["_DQuantSize1"] = q0, q1
+  for name, qd, mtd in (("Q0", q0, mt0), ("Q1", q1, mt1)):
+    if qd <= 0 or (qd & (qd - 1)) != 0:
+      reject(state, printRejectionReason, f"{label} {name} must be a power of two")
+      return False
+    if mtd % qd != 0:
+      reject(state, printRejectionReason, f"{label} {name} must divide MacroTile evenly")
+      return False
+  mfmaM = state["MatrixInstM"]
+  if q0 < mfmaM:
+    rowsPerLane = (mfmaM * state["MatrixInstN"]) // state["WavefrontSize"]
+    if q0 > rowsPerLane or (rowsPerLane % q0) != 0:
+      reject(state, printRejectionReason,
+             f"{label} Q0={q0} < MatrixInstM={mfmaM} is only supported when "
+             f"Q0 <= rowsPerLane={rowsPerLane} and Q0 divides rowsPerLane")
+      return False
+  mfmaN = state["MatrixInstN"]
+  if q1 < mfmaN:
+    reject(state, printRejectionReason,
+           f"{label} Q1={q1} must be >= MatrixInstN={mfmaN} (sub-mfma column quantization not supported)")
+    return False
+  wg = state["MIWaveGroup"]
+  if q0 > (mt0 // wg[0]) or q1 > (mt1 // wg[1]):
+    reject(state, printRejectionReason,
+           f"{label} Phase 1 requires QuantTileShape within a single wave sub-tile")
+    return False
+  return True
+
+
+def _validateMXFP8Quant(state, printRejectionReason):
+  """Validate MXFP8Quant fused epilogue constraints (feature flags, type, shape)."""
+  if state.get("DQuantType", "None") != "MXFP8":
+    return
+  if not _validateSubtileEpiloguePrereqs(state, printRejectionReason, "MXFP8Quant"):
+    return
+  if not state["ProblemType"]["DestDataType"].isFloat8():
+    reject(state, printRejectionReason,
+           "MXFP8Quant requires DestDataType=F8 (OCP e4m3); D is the fp8 output")
+    return
+  if not state["ProblemType"]["HighPrecisionAccumulate"]:
+    reject(state, printRejectionReason, "MXFP8Quant requires HighPrecisionAccumulate=True")
+    return
+  if state["ProblemType"].get("UseBeta", True):
+    reject(state, printRejectionReason, "MXFP8Quant requires UseBeta=False (beta must be 0)")
+    return
+  if state["ProblemType"].get("UseScaleCD", False):
+    reject(state, printRejectionReason,
+           "MXFP8Quant is incompatible with UseScaleCD (per-tile scale only)")
+    return
+  if state["ProblemType"].get("UseBias", 0) != 0:
+    reject(state, printRejectionReason, "MXFP8Quant does not support UseBias")
+    return
+  if state["ProblemType"].get("UseE", False):
+    reject(state, printRejectionReason, "MXFP8Quant does not support UseE")
+    return
+  if state["ProblemType"].get("UseGateResidual", False):
+    reject(state, printRejectionReason, "MXFP8Quant does not support UseGateResidual")
+    return
+  if state["ProblemType"].get("UseScaleAlphaVec", 0) != 0:
+    reject(state, printRejectionReason, "MXFP8Quant does not support UseScaleAlphaVec")
+    return
+  if state.get("PrefetchAcrossPersistent", 0):
+    reject(state, printRejectionReason,
+           "MXFP8Quant is not supported with PrefetchAcrossPersistent")
+    return
+  if state["ProblemType"]["OutputAmaxD"]:
+    reject(state, printRejectionReason, "MXFP8Quant does not support OutputAmaxD")
+    return
+  if (state.get("_GlobalAccumulation") == "MultipleBufferSingleKernel"
+      or state.get("AdaptiveGemmGSUA") == 1):
+    reject(state, printRejectionReason, "MXFP8Quant does not support MBSK/AdaptiveGemmGSUA")
+    return
+  if state["ProblemType"].get("GroupedGemm", False):
+    reject(state, printRejectionReason, "MXFP8Quant does not support GroupedGemm")
+    return
+  if not _resolveDQuantSize(state, printRejectionReason, "MXFP8Quant"):
+    return
+
+
+def _validatePartialRMSMXFP8Combo(state, printRejectionReason):
+  """Validate the combined PartialRMS + MXFP8Quant fused epilogue.
+
+  Called after both individual validators so that _resolveDQuantSize and
+  PartialRMS geometry are already set on state. Enforces the constraints that
+  are specific to the combination and cannot be caught individually.
+  """
+  if not (state.get("PartialRMS", False) and state.get("DQuantType", "None") == "MXFP8"):
+    return
+  if state.get("PartialRMSQuant", False):
+    reject(state, printRejectionReason,
+           "combined PartialRMS+MXFP8Quant mode: PartialRMSQuant must be False (MXFP8Quant owns quantization)")
+    return
+  if not state["ProblemType"]["DestDataType"].isFloat8():
+    reject(state, printRejectionReason,
+           "combined PartialRMS+MXFP8Quant mode requires DestDataType=F8 (fp8 e4m3 D output)")
+    return
+  if state["ProblemType"].get("UseBeta", True):
+    reject(state, printRejectionReason,
+           "combined PartialRMS+MXFP8Quant mode requires UseBeta=False")
+    return
+
+
+def _validateTileQuant(state, printRejectionReason):
+  """Validate TileQuant fused epilogue constraints (feature flags, type, shape)."""
+  if state.get("DQuantType", "None") != "Tile":
+    return
+  if state.get("PartialRMS", False):
+    reject(state, printRejectionReason,
+           "TileQuant is mutually exclusive with PartialRMS")
+    return
+  if not _validateSubtileEpiloguePrereqs(state, printRejectionReason, "TileQuant"):
+    return
+  # D is the fp8 output; require OCP e4m3 DestDataType.
+  if not state["ProblemType"]["DestDataType"].isFloat8():
+    reject(state, printRejectionReason,
+           "TileQuant requires DestDataType=F8 (OCP e4m3); D is the fp8 output")
+    return
+  if not state["ProblemType"]["HighPrecisionAccumulate"]:
+    reject(state, printRejectionReason, "TileQuant requires HighPrecisionAccumulate=True")
+    return
+  # TileQuant computes amax over A*B only; beta!=0 adds C after scaling
+  # and corrupts both the fp8 D values and QuantScale.
+  if state["ProblemType"].get("UseBeta", True):
+    reject(state, printRejectionReason, "TileQuant requires UseBeta=False (beta must be 0)")
+    return
+  # No competing per-tensor scale; TileQuant owns scaling via QuantScale.
+  if state["ProblemType"].get("UseScaleCD", False):
+    reject(state, printRejectionReason,
+           "TileQuant is incompatible with UseScaleCD (per-tile scale only)")
+    return
+  if state["ProblemType"].get("UseBias", 0) != 0:
+    reject(state, printRejectionReason, "TileQuant does not support UseBias")
+    return
+  if state["ProblemType"].get("UseE", False):
+    reject(state, printRejectionReason, "TileQuant does not support UseE")
+    return
+  if state["ProblemType"].get("UseGateResidual", False):
+    reject(state, printRejectionReason, "TileQuant does not support UseGateResidual")
+    return
+  if state["ProblemType"].get("UseScaleAlphaVec", 0) != 0:
+    reject(state, printRejectionReason, "TileQuant does not support UseScaleAlphaVec")
+    return
+  if state.get("PrefetchAcrossPersistent", 0):
+    reject(state, printRejectionReason, "TileQuant is not supported with PrefetchAcrossPersistent")
+    return
+  if state["ProblemType"]["OutputAmaxD"]:
+    reject(state, printRejectionReason, "TileQuant does not support OutputAmaxD")
+    return
+  if (state.get("_GlobalAccumulation") == "MultipleBufferSingleKernel"
+      or state.get("AdaptiveGemmGSUA") == 1):
+    reject(state, printRejectionReason, "TileQuant does not support MBSK/AdaptiveGemmGSUA")
+    return
+  if state["ProblemType"].get("GroupedGemm", False):
+    reject(state, printRejectionReason, "TileQuant does not support GroupedGemm")
+    return
+  if not _resolveDQuantSize(state, printRejectionReason, "TileQuant"):
+    return
+
+
+def _validateDeepseekScaleMultiK(state, printRejectionReason):
+  """Validate additional constraints for the Deepseek multi-K mainloop path.
+
+  This path is active when PrefetchGlobalRead in (0, 1, 2) and DepthU == DeepseekScaleBlockK.
+  The mainloop loads one scaleA/scaleB value per K-block iteration; several
+  microarchitectural limits apply only in this mode.
+  """
+  depthU = state.get("DepthU", 0)
+  # Guard 1: enforce K is always a multiple of DepthU (no tail loop).
+  # Raise AssertSummationElementMultiple so the kernel is only dispatched for
+  # K values that are multiples of blockK, preventing stale scale reads in the
+  # tail loop iteration.
+  asem = state.get("AssertSummationElementMultiple", 1)
+  if asem % depthU != 0:
+    state["AssertSummationElementMultiple"] = max(asem, depthU)
+
+  # Guard 2: scaleB mainloop loads one E8M0 byte per N-block; a wave may span
+  # up to 2 N-blocks (MT1=256). Wider single-wave N-tiles are not yet wired.
+  use_b = state.get("UseDeepseekScaleB", False)
+  mt1 = state.get("MacroTile1", 0)
+  wgN = state["MIWaveGroup"][1] if state.get("MIWaveGroup") else 1
+  nBlocksB = max(1, mt1 // (128 * wgN)) if mt1 else 1
+  if use_b and nBlocksB > 2:
+    reject(state, printRejectionReason,
+           f"useDeepseekScaleB multi-K path: wave spans {nBlocksB} N-blocks (max 2)")
+    return
+
+  if use_b and nBlocksB > 1 and state.get("PrefetchGlobalRead", 0) >= 1:
+    reject(state, printRejectionReason,
+           f"useDeepseekScaleB multi-K path: MacroTile1 spanning {nBlocksB} N-blocks "
+           f"per wave requires PrefetchGlobalRead=0 (VGPR pressure)")
+    return
+
+
+def _validateDeepseekScaleEpilogueModifiers(state, printRejectionReason):
+  """Reject epilogue modifiers incompatible with the DeepseekScale path.
+
+  The per-K-block scale is applied in the mainloop MFMA operand, so the
+  accumulator reaching the standard notLocalSplitUGlobalWrite epilogue is
+  already scaled. Purely-downstream modifiers (UseScaleAB, UseScaleAlphaVec,
+  UseScaleCD, UseScaleD, D-side UseBias, Activation, UseE) run on that
+  accumulator and are permitted. The modifiers below restructure the kernel
+  or the kernarg layout and are rejected. Returns True when a reject fired.
+  """
+  pt = state["ProblemType"]
+  if pt.get("Gradient", False):
+    reject(state, printRejectionReason,
+           "useDeepseekScale does not support Gradient (fused backward path "
+           "restructures the epilogue and bypasses the mainloop scale)")
+    return True
+  if pt.get("OutputAmaxD", False):
+    reject(state, printRejectionReason,
+           "useDeepseekScale does not support OutputAmaxD (kernarg layout conflict)")
+    return True
+  if pt.get("UseBias", 0) != 0 and pt.get("BiasSrc", "D") != "D":
+    reject(state, printRejectionReason,
+           "useDeepseekScale supports only D-side bias (BiasSrc=D); A/B-side "
+           "bias reduction requires the gradient path")
+    return True
+  return False
+
+
+def _validateDeepseekScaleDepthU(state, printRejectionReason):
+  """Reject DepthU/DeepseekScaleBlockK geometry mismatches. Returns True on reject."""
+  # fp8 MFMA instruction spans 128 K-elements (instK=128): DepthU must be a
+  # non-zero multiple of 128 so the subtile geometry has a valid K-grid.
+  abPairA = state.get("_ABTilePairA", "")
+  depthU = state.get("DepthU", 0)
+  if abPairA == "AB_B8" and (depthU <= 0 or depthU % 128 != 0):
+    reject(state, printRejectionReason,
+           f"useDeepseekScale with fp8 A requires DepthU to be a positive multiple "
+           f"of 128 (got DepthU={depthU})")
+    return True
+  blockK = state.get("DeepseekScaleBlockK", 128)
+  if depthU != blockK:
+    reject(state, printRejectionReason,
+           f"useDeepseekScaleA/B requires DepthU == DeepseekScaleBlockK "
+           f"(got DepthU={depthU}, blockK={blockK})")
+    return True
+  return False
+
+
+def _validateDeepseekScale(state, printRejectionReason):
+  """Validate UseDeepseekScaleA / UseDeepseekScaleB mainloop scale constraints.
+
+  Both scale flags share the same structural requirements: UseSubtileImpl,
+  HighPrecisionAccumulate, DepthU == DeepseekScaleBlockK (one scale block per
+  DepthU iteration), and mutual exclusion with TileQuant/PartialRMS/MXFP8Quant.
+  Either or both may be True.
+  """
+  use_a = state.get("UseDeepseekScaleA", False)
+  use_b = state.get("UseDeepseekScaleB", False)
+  if not use_a and not use_b:
+    return
+  if not state.get("UseSubtileImpl", False):
+    reject(state, printRejectionReason, "useDeepseekScale requires UseSubtileImpl")
+    return
+  if not state["ProblemType"].get("HighPrecisionAccumulate", False):
+    reject(state, printRejectionReason, "useDeepseekScale requires HighPrecisionAccumulate")
+    return
+  if tuple(state["ISA"]) != (9, 5, 0):
+    reject(state, printRejectionReason, "useDeepseekScale is only implemented on gfx950")
+    return
+  if state["MIArchVgpr"]:
+    reject(state, printRejectionReason,
+           "useDeepseekScale requires MIArchVgpr=False (emitter uses AGPR read/write instructions)")
+    return
+  if state["ProblemType"].get("GroupedGemm", False):
+    reject(state, printRejectionReason, "useDeepseekScale does not support GroupedGemm")
+    return
+  # The per-K-block scale is baked into each MFMA accumulation, so partial sums
+  # from K-splitting workgroups reduce correctly under the plain-summation
+  # workspace fixup (alpha is deferred to a single final store). Only the atomic
+  # reduction path is rejected: its alpha/beta timing is not audited for the
+  # mainloop scale.
+  if state["StreamK"] and state["StreamKAtomic"]:
+    reject(state, printRejectionReason,
+           "useDeepseekScale does not support atomic Stream-K (StreamKAtomic=1): "
+           "the atomic reduction path is not audited for the mainloop scale")
+    return
+  if _validateDeepseekScaleDepthU(state, printRejectionReason):
+    return
+  if state.get("PartialRMS", False):
+    reject(state, printRejectionReason,
+           "useDeepseekScale is mutually exclusive with PartialRMS")
+    return
+  if state.get("DQuantType", "None") != "None":
+    reject(state, printRejectionReason,
+           "useDeepseekScale is mutually exclusive with DQuantType=" + state["DQuantType"])
+    return
+  if _validateDeepseekScaleEpilogueModifiers(state, printRejectionReason):
+    return
+  # Mainloop scale path supports PGR=0 (no prefetch), PGR=1 (1-deep data
+  # prefetch; scale is loaded per K-block in each unroll copy and the NLL),
+  # and PGR=2 (2-deep lookahead; codegen support added in a later phase).
+  # PGR>=3 is unsupported.
+  if state.get("PrefetchGlobalRead", 1) not in (0, 1, 2):
+    reject(state, printRejectionReason,
+           "useDeepseekScale supports only PrefetchGlobalRead=0, 1, or 2 (mainloop scale path)")
+    return
+  _validateDeepseekScaleMultiK(state, printRejectionReason)
+
+
 def _validateStreamKForceDPOnly(state, printRejectionReason):
   if state["StreamKForceDPOnly"]:
     if state["StreamK"] != 3:
@@ -1000,6 +1439,12 @@ class Solution(collections.abc.Mapping):
       # Not currently implemented in subtile implementation
       state["Use64bShadowLimit"] = False
       state["Use64bShadowLimitMX"] = False
+      # The subtile scheduler always double-buffers LDS: SubtileGREmit/SubtileLREmit
+      # unconditionally emit buffer swaps that toggle between two LDS halves (XOR
+      # ldsTotalSize). Single-buffering is not implemented, so 1LDSBuffer=1 would
+      # allocate only one buffer (NumLdsBlk=1) while the code still swaps into the
+      # unallocated second half, corrupting results. Force double buffering.
+      state["1LDSBuffer"] = 0
 
       # DepthU must be a multiple of numSubIterK * MIK * LSU, where numSubIterK is the
       # number of K-subtiles per depth-U iteration: 1 for fp8 (AB_B8, subtileShape K=1),
@@ -1032,6 +1477,15 @@ class Solution(collections.abc.Mapping):
           state[f"_ABTilePair{tc}"] = "AB_B4"
         else:
           reject(state, printRejectionReason, f"No subtile geometry for dtype {dtype}")
+          return
+
+      for tc in ('A', 'B'):
+        from Tensile.Components.Subtile.Kernel import selectABGeometry
+        mmaK = selectABGeometry(state, tc).mmaTileShape[1]
+        if state["MatrixInstK"] != mmaK:
+          reject(state, printRejectionReason,
+                 f"UseSubtileImpl=1 with {state[f'_ABTilePair{tc}']} requires "
+                 f"MatrixInstK={mmaK} (got {state['MatrixInstK']})")
           return
 
       bytesLoaded = state["NumThreads"] * 16
@@ -1076,6 +1530,33 @@ class Solution(collections.abc.Mapping):
           reject(state, printRejectionReason, "UseSubtileImpl=1 PrefetchAcrossPersistent requires PrefetchGlobalRead=2")
         if state["DirectToVgprMXSA"] or state["DirectToVgprMXSB"]:
           reject(state, printRejectionReason, "UseSubtileImpl=1 PrefetchAcrossPersistent not supported with DirectToVgpr MX scale tensors")
+
+    _validatePartialRMS(state, printRejectionReason)
+    if not state["Valid"]:
+      return
+
+    _validateTileQuant(state, printRejectionReason)
+    if not state["Valid"]:
+      return
+
+    _validateMXFP8Quant(state, printRejectionReason)
+    if not state["Valid"]:
+      return
+
+    _validatePartialRMSMXFP8Combo(state, printRejectionReason)
+    if not state["Valid"]:
+      return
+
+    if state.get("UseDeepseekScaleA", False) or state.get("UseDeepseekScaleB", False):
+      _validateDeepseekScale(state, printRejectionReason)
+      if not state["Valid"]:
+        return
+
+    # TODO: Support other LdsBlockSizePerPadMXSA/B for gfx1250.
+    if state["ISA"] == (12, 5, 0):
+      if ((state["LdsBlockSizePerPadMXSA"] > 0) or (state["LdsBlockSizePerPadMXSB"] > 0 )):
+        reject(state, printRejectionReason, "LdsBlockSizePerPadMXSA/LdsBlockSizePerPadMXSB support -1 and 0 for gfx1250")
+        return
 
     state["Multicast"] = False
     state["ClusterBarrier"] = False
@@ -3073,9 +3554,13 @@ class Solution(collections.abc.Mapping):
       state["_DepthUA"] = depthUA# internal — data SRD advance
       if state["ProblemType"]["MXBlockA"]:
         state["_DepthUMXSA"] = depthU // state["ProblemType"]["MXBlockA"]
+      elif state.get("UseDeepseekScaleA", False):
+        state["_DepthUMXSA"] = depthU  # DS: one scale K-block per depthU
       state["_DepthUB"] = depthUB# internal — data SRD advance
       if state["ProblemType"]["MXBlockB"]:
         state["_DepthUMXSB"] = depthU // state["ProblemType"]["MXBlockB"]
+      elif state.get("UseDeepseekScaleB", False):
+        state["_DepthUMXSB"] = depthU  # DS: one scale K-block per depthU
       state["_DepthUMetadata"] = depthUM# internal
 
       # Runs here (not earlier) because it needs MacroTileA/B and _DepthUA/B,
@@ -5541,7 +6026,26 @@ class Solution(collections.abc.Mapping):
       ldsNumBytes += ldsAmaxDBytes
 
     state["LdsNumBytes"] = ldsNumBytes
-    ldsSize = ldsNumBytes
+
+    # PartialRMS cross-wave reduction guarantee:
+    # _validatePartialRMS runs early (before LdsNumBytes is finalised) so it can
+    # only check against MaxLDS.  Here, now that the reserved main-loop LDS
+    # region is finalised, ensure it is at least as large as the cross-wave
+    # scratch so the emitter's LDS writes are provably within the reserved
+    # region (freed at the epilogue).  The existing MaxLDS reject below then
+    # catches any device overflow.
+    if state.get("PartialRMS") and state["MIWaveGroup"][1] > 1:
+      wg = state["MIWaveGroup"]
+      # Use mma_n (MT1-derived) to match the emitter's numPartials in
+      # SubtilePartialRMSEmit.py, not mma_m (MT0-derived) which over-reserves
+      # for wide-MT0 tiles.
+      mma_n_prms    = (state["MacroTile1"] // state["MatrixInstN"]) // wg[1]
+      rows_per_lane = (state["MatrixInstM"] * state["MatrixInstN"]) // state["WavefrontSize"]
+      num_rows_prms = mma_n_prms * rows_per_lane
+      partialRMSLdsBytes = wg[0] * wg[1] * state["WavefrontSize"] * num_rows_prms * 4
+      state["LdsNumBytes"] = max(state["LdsNumBytes"], partialRMSLdsBytes)
+
+    ldsSize = state["LdsNumBytes"]
     if ldsSize > state["MaxLDS"]:
       reject(state, printRejectionReason, "Kernel Uses %u > %u bytes of LDS" % ( ldsSize, state["MaxLDS"]))
       state["ValidDepthU"] = False

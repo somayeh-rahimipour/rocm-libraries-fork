@@ -166,4 +166,13 @@ def getRequiredParametersMin() -> set:
         'UsePLRPack',
         'UseSubtileImpl',
         'ClusterDim',
+        'PartialRMS',
+        'PartialRMSQuant',
+        'PartialRMSResidualAdd',
+        'DQuantType',
+        'DQuantSize0',
+        'DQuantSize1',
+        'UseDeepseekScaleA',
+        'UseDeepseekScaleB',
+        'DeepseekScaleBlockK',
     })

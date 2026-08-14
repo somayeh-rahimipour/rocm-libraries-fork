@@ -72,7 +72,9 @@ class ProblemType:
                  'highPrecisionAccumulate', 'useInitialStridesAB', 'useInitialStridesCD', 'stridedBatched', 'groupedGemm',
                  'useGradient', 'activationType', 'activationArgLength', 'activationComputeDataType', 'activationNoGuard',
                  'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
-                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat']
+                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat',
+                 'usePartialRMS', 'partialRMSResidualAdd', 'partialRMSQuant',
+                 'dquantType', 'useDeepseekScaleA', 'useDeepseekScaleB']
     @classmethod
     def FromOriginalState(cls, d):
         indices = [None]*d['TotalIndices']
@@ -258,6 +260,13 @@ class ProblemType:
         if 'OutputAmaxD' in d:
             rv.outputAmaxD = d['OutputAmaxD']
 
+        rv.usePartialRMS = bool(d.get('UsePartialRMS', False))
+        rv.partialRMSResidualAdd = bool(d.get('PartialRMSResidualAdd', False))
+        rv.partialRMSQuant = bool(d.get('PartialRMSQuant', False))
+        rv.dquantType = str(d.get('DQuantType', 'None'))
+        rv.useDeepseekScaleA = bool(d.get('UseDeepseekScaleA', False))
+        rv.useDeepseekScaleB = bool(d.get('UseDeepseekScaleB', False))
+
         rv.useScaleAB = ""
         if 'UseScaleAB' in d:
             rv.useScaleAB = d['UseScaleAB']
@@ -431,6 +440,12 @@ class ProblemType:
             predicates.append(ProblemPredicate("MXBlockB", value=self.mxBlockB))
             if self.mxBlockB:
                 predicates.append(ProblemPredicate("DataTypeMXSB", value=self.mxTypeB))
+            predicates.append(ProblemPredicate("UsePartialRMS", value=self.usePartialRMS))
+            predicates.append(ProblemPredicate("UsePartialRMSResidualAdd", value=self.partialRMSResidualAdd))
+            predicates.append(ProblemPredicate("UsePartialRMSQuant", value=self.partialRMSQuant))
+            predicates.append(ProblemPredicate("DQuantType", value=self.dquantType))
+            predicates.append(ProblemPredicate("UseDeepseekScaleA", value=self.useDeepseekScaleA))
+            predicates.append(ProblemPredicate("UseDeepseekScaleB", value=self.useDeepseekScaleB))
         return predicates
 
 def extractDimPredicate(cls, key, value, predicateName):
@@ -601,6 +616,10 @@ class ProblemPredicate(Properties.Predicate):
         if state['ProblemType']['SwizzleTensorB']:
             rv += [cls('SwizzleTensorB', value=state['ProblemType']['SwizzleTensorB'])]
 
+        if state.get('DQuantType', 'None') != 'None':
+            rv += [cls('DQuantSize0', value=state['_DQuantSize0'])]
+            rv += [cls('DQuantSize1', value=state['_DQuantSize1'])]
+
         return rv
 
     @classmethod
@@ -655,6 +674,13 @@ class SizeMapping:
                  'adaptiveGemmNTAB',
                  'customMainLoopScheduling',
                  'useSubtileImpl',
+                 'PartialRMS',
+                 'PartialRMSResidualAdd',
+                 'dquantType',
+                 'dquantSize0',
+                 'dquantSize1',
+                 'useDeepseekScaleA',
+                 'useDeepseekScaleB',
                  'NonTemporalD',
                  'WaveSeparateGlobalReadA',
                  'WaveSeparateGlobalReadB',
@@ -750,6 +776,13 @@ class SizeMapping:
                    adaptiveGemmNTAB         = d['AdaptiveGemmNTAB'] if 'AdaptiveGemmNTAB' in d else 0,
                    customMainLoopScheduling = d['UseCustomMainLoopSchedule'],
                    useSubtileImpl           = bool(d.get('UseSubtileImpl', False)),
+                   PartialRMS               = bool(d.get('PartialRMS', False)),
+                   PartialRMSResidualAdd    = bool(d.get('PartialRMSResidualAdd', False)),
+                   dquantType               = str(d.get('DQuantType', 'None')),
+                   dquantSize0              = int(d.get('_DQuantSize0', 0)),
+                   dquantSize1              = int(d.get('_DQuantSize1', 0)),
+                   useDeepseekScaleA        = bool(d.get('UseDeepseekScaleA', False)),
+                   useDeepseekScaleB        = bool(d.get('UseDeepseekScaleB', False)),
                    NonTemporalD             = d['NonTemporalD'],
                    WaveSeparateGlobalReadA  = d['WaveSeparateGlobalReadA'],
                    WaveSeparateGlobalReadB  = d['WaveSeparateGlobalReadB'],
