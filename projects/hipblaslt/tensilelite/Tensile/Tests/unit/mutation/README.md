@@ -9,7 +9,8 @@ These scripts provide the safety-critical foundation for a serial mutmut run:
 - `mutmut-verify.sh` proves individual kills by running one pytest node against
   clean and mutated source, then restoring the source file.
 
-For the complete agent-assisted workflow, use the
+For instructions that guide a coding assistant through the complete workflow,
+use the
 [`tensilelite-mutation-rerun`](../../../../../skills/tensilelite-mutation-rerun/SKILL.md)
 project skill:
 
@@ -18,13 +19,13 @@ Use $tensilelite-mutation-rerun to rerun mutation testing for
 Tensile/Common/Utilities.py.
 ```
 
-The skill is the canonical source for covering-set validation, fail-closed
-decision rules, survivor triage, rerun provenance, and handoff requirements.
-This README remains the human command reference for the core scripts.
+The skill explains how to select tests for one module, review every mutation
+result, record the source and container, restore edited files, and write a
+handoff. This README remains the command reference for the three scripts.
 
-Mutmut itself runs without these wrappers. They preserve reproducibility and
-restoration across TensileLite reruns. The skill owns the detailed platform
-constraints and guardrails; the actual mutation engine requires Linux or WSL.
+Mutmut can run without the scripts. The scripts add environment records and
+restoration checks that make TensileLite results repeatable. Running mutmut
+requires Linux or Windows Subsystem for Linux (WSL), normally through Docker.
 
 Run all examples from the `rocm-libraries` repository root. The examples assume
 an already-created container named `tl-mut` with the repository mounted at
