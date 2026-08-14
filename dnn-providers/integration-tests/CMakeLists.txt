@@ -146,7 +146,6 @@ add_executable(${INTEGRATION_TESTS_EXE}
     src/harness/bundle/IntegrationBundleVerificationHarness.cpp
     src/harness/bundle/SupportClaimWriter.cpp
     src/harness/bundle/SupportClaims.cpp
-    src/harness/bundle/SupportObservationEmitter.cpp
     src/harness/bundle/SupportVerdict.cpp
     src/harness/input-init/FillInputs.cpp
 )

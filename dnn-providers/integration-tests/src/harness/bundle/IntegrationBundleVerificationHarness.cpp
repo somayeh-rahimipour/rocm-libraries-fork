@@ -4,9 +4,17 @@
 #include "harness/bundle/IntegrationBundleVerificationHarness.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
 #include <ostream>
 #include <set>
 #include <sstream>
+#include <system_error>
+
+#include <nlohmann/json.hpp>
 
 #include "harness/BundleMetadata.hpp"
 #include <hipdnn_data_sdk/utilities/Workspace.hpp>
@@ -26,6 +34,7 @@
 #include "harness/SharedHandle.hpp"
 #include "harness/TestConfig.hpp"
 #include "harness/TomlGuards.hpp"
+#include "harness/bundle/BundleRegistration.hpp"
 #include "harness/bundle/LoadedEngineTable.hpp"
 #include "harness/bundle/SupportClaimReport.hpp"
 #include "harness/bundle/SupportObservationLog.hpp"
@@ -37,6 +46,72 @@
 
 namespace hipdnn_integration_tests::bundle
 {
+
+namespace
+{
+
+std::string bundleKeyForObservation(const std::filesystem::path& sidecarPath)
+{
+    const auto directory = sidecarPath.parent_path();
+    const auto bundleRoot = resolveDataDir();
+
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(directory, bundleRoot, ec);
+
+    if(ec || relative.empty() || *relative.begin() == "..")
+    {
+        return directory.generic_string();
+    }
+    return relative.generic_string();
+}
+
+std::string currentUtcTimestampForObservation()
+{
+    const auto seconds = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &seconds);
+#else
+    gmtime_r(&seconds, &utc);
+#endif
+
+    std::array<char, 32> buffer{};
+    const std::size_t written
+        = std::strftime(buffer.data(), buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return {buffer.data(), written};
+}
+
+void emitObservationLine(const std::string& bundle,
+                         const nlohmann::json& caseId,
+                         const std::string& engineName,
+                         const std::string& arch,
+                         const std::string& platform,
+                         ObservedSupport support,
+                         const std::string& enforcementLevel)
+{
+    auto envOr = [](const char* name) -> std::string {
+        const char* v = std::getenv(name);
+        return v ? v : "";
+    };
+
+    nlohmann::json record;
+    record["bundle"] = bundle;
+    record["case_id"] = caseId;
+    record["engine"] = engineName;
+    record["arch"] = arch;
+    record["platform"] = platform;
+    record["verdict"] = toString(support);
+    record["enforcement_level"] = enforcementLevel;
+    record["provenance"] = {{"rocm_version", envOr("ROCM_VERSION")},
+                            {"commit", envOr("CI_COMMIT_SHA")},
+                            {"run_id", envOr("CI_RUN_ID")},
+                            {"timestamp", currentUtcTimestampForObservation()}};
+
+    std::cout << "##support-observation:" << record.dump() << std::endl;
+}
+
+} // namespace
 
 // ---- virtual defaults ------------------------------------------------------
 
@@ -244,17 +319,29 @@ void IntegrationBundleVerificationHarness::recordSupportObservations()
 
     const std::string arch = baseArchToken(TestConfig::get().getCurrentArch());
     const std::string platform = currentPlatform();
-    const EnforcementLevel level = _bundle->metadata.enforcementLevel;
+    const bool emitToStdout = TestConfig::get().emitSupportObservations();
 
-    // Every exit below records one row per engine, UNKNOWN included. A cell
-    // that silently dropped out of the log would be indistinguishable from one
-    // a shard never reached, and telling those two apart is the entire job of
-    // the harvest coverage report.
     const auto recordAll = [&](ObservedSupport support) {
         for(const auto& engine : engines)
         {
-            SupportObservationLog::get().record(
-                {_claimLocator, engine.name, arch, platform, support, level});
+            SupportObservationLog::get().record({_claimLocator,
+                                                 engine.name,
+                                                 arch,
+                                                 platform,
+                                                 support,
+                                                 _bundle->metadata.enforcementLevel});
+
+            if(emitToStdout)
+            {
+                emitObservationLine(bundleKeyForObservation(_claimLocator.sidecarPath),
+                                    _claimLocator.isSweep() ? nlohmann::json(_claimLocator.caseId)
+                                                            : nlohmann::json(nullptr),
+                                    engine.name,
+                                    arch,
+                                    platform,
+                                    support,
+                                    toString(_bundle->metadata.enforcementLevel));
+            }
         }
     };
 
@@ -282,16 +369,28 @@ void IntegrationBundleVerificationHarness::recordSupportObservations()
 
     for(const auto& engine : engines)
     {
-        const bool engineIsSupported
+        const bool supported
             = std::find(engineIds.begin(), engineIds.end(), engine.id) != engineIds.end();
+        const auto verdict = supported ? ObservedSupport::SUPPORTED : ObservedSupport::DECLINED;
 
-        SupportObservationLog::get().record(
-            {_claimLocator,
-             engine.name,
-             arch,
-             platform,
-             engineIsSupported ? ObservedSupport::SUPPORTED : ObservedSupport::DECLINED,
-             level});
+        SupportObservationLog::get().record({_claimLocator,
+                                             engine.name,
+                                             arch,
+                                             platform,
+                                             verdict,
+                                             _bundle->metadata.enforcementLevel});
+
+        if(emitToStdout)
+        {
+            emitObservationLine(bundleKeyForObservation(_claimLocator.sidecarPath),
+                                _claimLocator.isSweep() ? nlohmann::json(_claimLocator.caseId)
+                                                        : nlohmann::json(nullptr),
+                                engine.name,
+                                arch,
+                                platform,
+                                verdict,
+                                toString(_bundle->metadata.enforcementLevel));
+        }
     }
 }
 
@@ -324,7 +423,7 @@ void IntegrationBundleVerificationHarness::runComparison()
     // verdict it would have reached anyway (RFC 0015 §12.1). Hence no early
     // return here, and hence the try/catch — a failed query costs a JSONL line,
     // never a red test.
-    if(TestConfig::get().hasSupportObservationsPath())
+    if(TestConfig::get().emitSupportObservations())
     {
         recordSupportObservationsQuietly();
     }
