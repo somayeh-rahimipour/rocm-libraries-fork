@@ -4,22 +4,6 @@
 #include "Container.hpp"
 #include "device/CurrentDevicePropertyProvider.hpp"
 
-#ifdef HIPDNN_ENGINE_HIP_MLOPS
-#include "engines/hip_mlops_engine/HipMlopsEngine.hpp"
-#include "engines/hip_mlops_engine/plans/RMSnorm/RMSnormBwdPlanBuilder.hpp"
-#include "engines/hip_mlops_engine/plans/RMSnorm/RMSnormPlanBuilder.hpp"
-#include "engines/hip_mlops_engine/plans/batchnorm/BatchnormFwdTrainingPlanBuilder.hpp"
-#include "engines/hip_mlops_engine/plans/batchnorm/BatchnormPlanBuilder.hpp"
-#include "engines/hip_mlops_engine/plans/layernorm/LayernormPlanBuilder.hpp"
-#include "engines/hip_mlops_engine/plans/resample/ResamplePlanBuilder.hpp"
-#endif
-
-#ifdef HIPDNN_ENGINE_ASM_SDPA
-#include "engines/asm_sdpa_engine/AsmSdpaEngine.hpp"
-#include "engines/asm_sdpa_engine/plans/SdpaBwdPlanBuilder.hpp"
-#include "engines/asm_sdpa_engine/plans/SdpaFwdPlanBuilder.hpp"
-#endif
-
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 #include <filesystem>
 
@@ -42,46 +26,11 @@ using namespace hipdnn_data_sdk::utilities;
 const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions()
 {
     static const std::vector<EngineDefinition> s_engineDefinitions = [] {
-        std::vector<EngineDefinition> definitions = {
-        // HIP_MLOPS_ENGINE
-#ifdef HIPDNN_ENGINE_HIP_MLOPS
-            {HIP_MLOPS_ENGINE_ID,
-             [](const device::IDevicePropertyProvider& devicePropertyProvider)
-                 -> std::unique_ptr<hipdnn_plugin_sdk::IEngine<Handle, Settings, Context>> {
-                 auto engine = std::make_unique<HipMlopsEngine>(HIP_MLOPS_ENGINE_ID);
-                 const compilation::IKernelCompiler& kernelCompiler = engine->getKernelCompiler();
-                 engine->addPlanBuilder(std::make_unique<batchnorm::BatchnormPlanBuilder>(
-                     kernelCompiler, devicePropertyProvider));
-                 engine->addPlanBuilder(
-                     std::make_unique<batchnorm::BatchnormFwdTrainingPlanBuilder>(
-                         kernelCompiler, devicePropertyProvider));
-                 engine->addPlanBuilder(std::make_unique<rmsnorm::RMSnormPlanBuilder>(
-                     kernelCompiler, devicePropertyProvider));
-                 engine->addPlanBuilder(std::make_unique<rmsnorm::RMSnormBwdPlanBuilder>(
-                     kernelCompiler, devicePropertyProvider));
-                 engine->addPlanBuilder(std::make_unique<layernorm::LayernormPlanBuilder>(
-                     kernelCompiler, devicePropertyProvider));
-                 engine->addPlanBuilder(std::make_unique<resample::ResamplePlanBuilder>(
-                     kernelCompiler, devicePropertyProvider));
-                 return engine;
-             }},
-#endif
-#ifdef HIPDNN_ENGINE_ASM_SDPA
-            // ASM_SDPA_ENGINE
-            {ASM_SDPA_ENGINE_ID,
-             [](const device::IDevicePropertyProvider& /*devicePropertyProvider*/)
-                 -> std::unique_ptr<hipdnn_plugin_sdk::IEngine<Handle, Settings, Context>> {
-                 auto engine = std::make_unique<asm_sdpa_engine::AsmSdpaEngine>();
-                 engine->addPlanBuilder(std::make_unique<asm_sdpa_engine::SdpaFwdPlanBuilder>());
-                 engine->addPlanBuilder(std::make_unique<asm_sdpa_engine::SdpaBwdPlanBuilder>());
-                 return engine;
-             }},
-#endif
-        };
+        std::vector<EngineDefinition> definitions;
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
-        // One ingestor engine per discovered descriptor set, and a set is now a file on
-        // disk: adding an engine is an install, not an edit here.
+        // One engine per discovered descriptor set, and a set is now a file on disk:
+        // adding an engine is an install, not an edit here.
         for(const auto& set : kernel_ingestor_engine::discoverDescriptorSets())
         {
             // engineNameToId, not a provider-side registration: the loader already interned
@@ -105,7 +54,7 @@ const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions(
                      {
                          // The loader validates each set, but its probe and this construction
                          // are different objects, so that's convention, not a guarantee.
-                         // Return null: throwing here would cost HIP_MLOPS and ASM_SDPA too.
+                         // Return null: throwing here would cost every other engine too.
                          HIPDNN_PLUGIN_LOG_ERROR("ingestor: engine '"
                                                  << set.engine.name
                                                  << "' failed to construct and is excluded: "
