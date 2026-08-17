@@ -219,6 +219,16 @@ def _getName(state, requiredParameters: frozenset, splitGSU: bool, ignoreInterna
   if state.get("LDSSegmentInterleave") == 1:
     requiredParametersTemp.add("LDSSegmentInterleave")
 
+  # SwizzleGlobalLoadMode only selects between the LDS-staged variants of a
+  # swizzled tensor; DirectToVgpr picks the register path and ignores it. Name it
+  # only when it is actually in effect, so the two LDS variants stay distinct
+  # kernels (they collide on one filename otherwise) without giving every
+  # DirectToVgpr or non-swizzled kernel a meaningless tag.
+  for _tc in ("A", "B"):
+    if state["ProblemType"].get("SwizzleTensor%s"%_tc) and not state.get("DirectToVgpr%s"%_tc):
+      requiredParametersTemp.add("SwizzleGlobalLoadMode")
+      break
+
   for key in sorted(requiredParametersTemp):
     if key not in state or key == "CustomKernelName":
       continue

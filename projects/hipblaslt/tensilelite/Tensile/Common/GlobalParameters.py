@@ -495,6 +495,7 @@ defaultBenchmarkCommonParameters = [
     {"BufferLoad": [True]},
     {"BufferStore": [True]},
     {"CompactLoopStore": [False]},
+    {"SwizzleGlobalLoadMode": [1]},
     {"DirectToVgprA": [False]},
     {"DirectToVgprB": [False]},
     {"DirectToVgprMXSA": [False]},

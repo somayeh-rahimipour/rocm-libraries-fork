@@ -499,6 +499,22 @@ validParameters = { # we need to make sure this matches develop
     # CompactLoopStore default (opt-in, off by default). When enabled, the
     # per-batch global write body is wrapped in a CLS countdown loop and
     "CompactLoopStore": [False, True],
+    # How a pre-swizzled (SwizzleTensorA/B) tensor that is NOT loaded
+    # direct-to-VGPR is staged into the matrix instruction. DirectToVgpr{A|B}
+    # already selects the register path, so this parameter only distinguishes the
+    # LDS-staged variants and is ignored when DirectToVgpr is set for the
+    # swizzled tensor.
+    #   1: ordinary (tile, unroll) thread assignment. Only the global address is
+    #      redirected into the swizzled layout, so local write and local read are
+    #      untouched. A wave reads its 512 B as 4 x 128 B pieces; a workgroup
+    #      covers a contiguous 1 KB block per MI_{M|N} rows.
+    #   2: swizzle-native assignment. Lane L takes row L%MI_{M|N} and k-group
+    #      L/MI_{M|N}, so a wave's global read is fully contiguous. Needs the
+    #      local write offsets to follow the same mapping.
+    # The on-disk layout of the swizzled tensor is the same either way, and the
+    # same as the DirectToVgpr path, so one pre-tiled tensor works with all of
+    # them.
+    "SwizzleGlobalLoadMode": [1, 2],
     # Attempt to load directly from global memory into Vgpr.
     # Assembly only
     "DirectToVgprA": [False, True],

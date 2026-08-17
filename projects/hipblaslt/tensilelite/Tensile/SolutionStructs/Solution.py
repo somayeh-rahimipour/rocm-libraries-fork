@@ -1154,7 +1154,12 @@ class Solution(collections.abc.Mapping):
     # dupFactor times fewer distinct elements than the count above assumes.
     # .get(): this is a staticmethod also driven directly from unit tests with a
     # partial state that carries no ProblemType.
-    if tc in ("A", "B") and state.get("ProblemType", {}).get("SwizzleTensor%s"%tc, False):
+    # Only the DirectToVgpr path replicates: it hands the matrix instruction its
+    # operand straight from VGPRs, so the upper lanes duplicate the lower ones. An
+    # LDS-staged swizzled tensor gives every lane distinct data, so scaling there
+    # would double the load count and halve LSP for no reason.
+    if tc in ("A", "B") and state.get("ProblemType", {}).get("SwizzleTensor%s"%tc, False) \
+        and state.get("DirectToVgpr%s"%tc, False):
       state["NumLoads%s"%tc] *= swizzleGeometry(state, tc)["dupFactor"]
     #print "result: ", pvar(state, "GlobalReadVectorWidth%s"%tc), \
     #        pvar(state, "NumLoads%s"%tc)
@@ -3874,15 +3879,22 @@ class Solution(collections.abc.Mapping):
           if GRVW_TC != laneSize:
             reject(state, printRejectionReason, f"SwizzleTensor{tc} doesn't support GRVW{tc} ({GRVW_TC}) != swizzle lane size ({laneSize})")
 
+      # A swizzled tensor either goes straight to VGPRs (DirectToVgpr) or is
+      # staged through LDS, in which case SwizzleGlobalLoadMode picks the variant.
+      # The LDS path needs the unroll to be the coalesced dim, because the address
+      # mapping folds the swizzle into the ordinary per-load walk.
+      swzMode = state["SwizzleGlobalLoadMode"]
+      for tc in ("A", "B"):
+        if state["ProblemType"]["SwizzleTensor%s"%tc] and not state["DirectToVgpr%s"%tc] \
+            and state["ProblemType"]["TLU%s"%tc]:
+          reject(state, printRejectionReason,
+                 f"LDS-staged SwizzleTensor{tc} needs TLU{tc}=False (unroll is the coalesced dim)")
+
       if state["ProblemType"]["SwizzleTensorA"]:
-        if not state["DirectToVgprA"]:
-          reject(state, printRejectionReason, f"Tensor A swizzling requires DirectToVgprA")
         if not state["ProblemType"]["TransposeA"]:
           reject(state, printRejectionReason, f"Tensor A swizzling supports TN or TT only")
 
       if state["ProblemType"]["SwizzleTensorB"]:
-        if not state["DirectToVgprB"]:
-          reject(state, printRejectionReason, f"Tensor B swizzling requires DirectToVgprB")
         if state["ProblemType"]["TransposeB"]:
           reject(state, printRejectionReason, f"Tensor B swizzling supports TN or NN only")
 
@@ -4362,6 +4374,52 @@ class Solution(collections.abc.Mapping):
       if not Solution.setGlobalLoadTileDimClassic(state, "MXSB", state["NumLoadsMXSB"], \
           totalVectorsCoalescedMXSB, totalElementsPerpMXSB, state["_DepthUMXSB"], printRejectionReason):
         return
+
+    # LSC/LSP only exist once setGlobalLoadTileDimClassic has run. Mode 1 folds the
+    # swizzled address into the ordinary per-load walk, which stays a constant step
+    # only if each step moves a whole number of swizzle blocks along the tile dim
+    # and a whole number of lanes along the unroll.
+    for tc in ("A", "B"):
+      if state["ProblemType"]["SwizzleTensor%s"%tc] and not state["DirectToVgpr%s"%tc]:
+        swzMorN = state["MatrixInstM"] if tc == "A" else state["MatrixInstN"]
+        laneSize = swizzleGeometry(state, tc)["laneSize"]
+        if state["SwizzleGlobalLoadMode"] == 2:
+          # Mode 2 hands out lanes with shifts and masks, so the wave/block
+          # decomposition has to be power-of-two, and the workgroup's waves must
+          # tile the LSC x LSP load exactly once.
+          kGroupsPerWave = state["WavefrontSize"] // swzMorN
+          mBlocks = state["LSP%s"%tc] // swzMorN
+          kChunk = kGroupsPerWave * laneSize
+          numWaves = state["NumThreads"] // state["WavefrontSize"]
+          if kGroupsPerWave < 1:
+            reject(state, printRejectionReason,
+                   "SwizzleGlobalLoadMode 2 needs WavefrontSize (%u) >= MI_%s (%u)"
+                   %(state["WavefrontSize"], "M" if tc == "A" else "N", swzMorN))
+            return
+          for nm, val in (("mBlocks", mBlocks), ("kGroupsPerWave", kGroupsPerWave)):
+            if val < 1 or (val & (val - 1)) != 0:
+              reject(state, printRejectionReason,
+                     "SwizzleGlobalLoadMode 2 needs %s (%u) to be a power of two"%(nm, val))
+              return
+          if state["LSC%s"%tc] % kChunk != 0 or mBlocks * (state["LSC%s"%tc] // kChunk) != numWaves:
+            reject(state, printRejectionReason,
+                   "SwizzleGlobalLoadMode 2 needs mBlocks(%u) * LSC%s(%u)/kChunk(%u) == numWaves(%u)"
+                   %(mBlocks, tc, state["LSC%s"%tc], kChunk, numWaves))
+            return
+          if state["GlobalReadVectorWidth%s"%tc] != laneSize:
+            reject(state, printRejectionReason,
+                   "SwizzleGlobalLoadMode 2 needs GRVW%s == swizzle lane size (%u)"%(tc, laneSize))
+            return
+        if state["LSP%s"%tc] % swzMorN != 0:
+          reject(state, printRejectionReason,
+                 "SwizzleGlobalLoadMode %u needs LSP%s (%u) to be a multiple of MI_%s (%u)"
+                 %(state["SwizzleGlobalLoadMode"], tc, state["LSP%s"%tc], "M" if tc == "A" else "N", swzMorN))
+          return
+        if state["LSC%s"%tc] % laneSize != 0:
+          reject(state, printRejectionReason,
+                 "SwizzleGlobalLoadMode 1 needs LSC%s (%u) to be a multiple of the swizzle lane size (%u)"
+                 %(tc, state["LSC%s"%tc], laneSize))
+          return
 
     if state["ProblemType"]["Sparse"] and not state["DirectToVgprSparseMetadata"]:
       if state["ProblemType"]["TLUMetadata"]:
