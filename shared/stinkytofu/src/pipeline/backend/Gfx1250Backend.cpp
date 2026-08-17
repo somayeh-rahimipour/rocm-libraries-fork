@@ -201,7 +201,10 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                                               debugStreams);
             epiloguePM.addPass(createEpilogueStoreSinkPass(
                 /*targetValu=*/10, /*tailGuard=*/2, /*reverseSink=*/true, /*crossLoadcnt=*/true,
-                /*msbGuard=*/moduleOptions.EpilogueSinkMsbGuard));
+                /*msbGuard=*/moduleOptions.EpilogueSinkMsbGuard,
+                /*clusterSize=*/static_cast<unsigned>(
+                    moduleOptions.EpilogueSinkClusterSize > 0 ? moduleOptions.EpilogueSinkClusterSize
+                                                              : 0)));
             pm.addPass(createKernelToRegionPassAdaptor(module, "globalWriteEpilogue",
                                                        std::move(epiloguePM)));
         }

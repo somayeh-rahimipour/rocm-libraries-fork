@@ -409,6 +409,11 @@ globalParameters["StinkyTofuEnableEpilogueSink"] = True
 # s_wait_xcnt 0. Off by default = unconditional sink; on = sweep the guard.
 globalParameters["StinkyTofuEpilogueSinkMsbGuard"] = False
 
+# Store-clustering group size for the epilogue sink (gfx1250): 0/1 = off. Packs K
+# consecutive stores adjacent so InsertVgprMsb emits one s_wait_xcnt per group
+# instead of per store. Experiment knob — sweep 0/2/4.
+globalParameters["StinkyTofuEpilogueSinkClusterSize"] = 0
+
 globalParameters["DisableSTWaitCnt"] = False
 
 # Internal plumbing for the --cpu-only CLI switch (see Tensile.py addCommonArguments).

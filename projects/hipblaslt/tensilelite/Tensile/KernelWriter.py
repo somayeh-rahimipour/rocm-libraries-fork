@@ -6799,6 +6799,10 @@ class KernelWriter(metaclass=abc.ABCMeta):
                                # it straddles an s_set_vgpr_msb flip (which would force s_wait_xcnt 0).
                                # Off = unconditional sink (current uplifted behaviour).
                                "EpilogueSinkMsbGuard": bool(globalParameters.get("StinkyTofuEpilogueSinkMsbGuard") or False),
+                               # Store-clustering group size (0/1 = off). Packs K stores adjacent so
+                               # InsertVgprMsb emits one s_wait_xcnt per group instead of per store.
+                               # Experiment knob — sweep 0/2/4.
+                               "EpilogueSinkClusterSize": int(globalParameters.get("StinkyTofuEpilogueSinkClusterSize") or 0),
                                "TileA0": kernel["ThreadTile0"],
                                "TileB0": kernel["ThreadTile1"],
                                "TileM0": kernel["MacroTile0"],

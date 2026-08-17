@@ -195,16 +195,83 @@ size_t sinkStoresInBlock(BasicBlock& bb, unsigned targetValu, unsigned tailGuard
     return moved;
 }
 
+// Pull a store UP to sit immediately after `anchor` (a preceding store), if every
+// instruction strictly between anchor and the store is safe to hop over. This is
+// the OPPOSITE motion from sinkOneStore: instead of each store chasing its own
+// va_vdst runway (which strands it across an msb flip → forced s_wait_xcnt 0), we
+// pack K consecutive stores adjacent so InsertVgprMsb emits ONE xcnt drain for the
+// whole run (b2b buffer_store is free, §7.1) rather than one per store. The VALU
+// that was between them (fmac/cvt for later elements) moves BELOW the store run —
+// its va_vdst is then hidden behind the NEXT batch's stores instead of forcing a
+// drain here. Returns true if the store was moved up.
+//
+// Safety: the store may hop an instruction X iff X does not write any reg the store
+// reads (WAR/RAW) and X is not itself a store/side-effect/boundary. We hop VALU and
+// (optionally) pure loadcnt waits — the same envelope sinkOneStore uses in reverse.
+static bool clusterOneStore(BasicBlock& bb, BasicBlock::iterator anchorIt,
+                            BasicBlock::iterator storeIt, bool crossLoadcnt) {
+    StinkyInstruction& store = getStinkyInst(storeIt);
+    std::set<RegUnit> readUnits;
+    collectUnits(store.getSrcRegs(), readUnits);
+
+    // Verify the whole span (anchor, store) is hoppable before moving anything.
+    for (BasicBlock::iterator it = std::next(anchorIt); it != storeIt; ++it) {
+        auto* p = dyn_cast<StinkyInstruction>(it.getNodePtr());
+        if (!p) return false;  // label / directive between — give up
+        StinkyInstruction& cand = *p;
+        if (hasSideEffect(cand) && !(crossLoadcnt && isPureLoadcntWait(cand))) return false;
+        if (writesAny(cand, readUnits)) return false;  // WAR: store reads a reg cand writes
+    }
+
+    // Move the store to just after the anchor (before anchor's current next).
+    BasicBlock::iterator insertPos = std::next(anchorIt);
+    if (insertPos == storeIt) return false;  // already adjacent — nothing to do
+    bb.removeIR(&store);
+    bb.insertIR(insertPos, &store);
+    return true;
+}
+
+// Cluster runs of stores in the block: within each maximal run of stores separated
+// only by hoppable (VALU / loadcnt) instructions, pack up to `clusterSize` stores
+// adjacent to the run's first store. Runs are re-anchored every `clusterSize` stores
+// so one xcnt covers each group of clusterSize (bounded so a huge run does not push
+// all its VALU past a single drain, which would over-serialize the tail).
+static size_t clusterStoresInBlock(BasicBlock& bb, unsigned clusterSize, unsigned tailGuard,
+                                   bool crossLoadcnt) {
+    if (clusterSize < 2) return 0;
+    std::vector<BasicBlock::iterator> stores;
+    for (auto it = bb.begin(); it != bb.end(); ++it) {
+        auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
+        if (inst && isGlobalMemStore(*inst)) stores.push_back(it);
+    }
+    const size_t clusterCount = stores.size() > tailGuard ? stores.size() - tailGuard : 0;
+    size_t moved = 0;
+    size_t i = 0;
+    while (i < clusterCount) {
+        // stores[i] anchors a group; pull the next (clusterSize-1) up behind it.
+        BasicBlock::iterator anchor = stores[i];
+        size_t g = 1;
+        for (; g < clusterSize && (i + g) < clusterCount; ++g) {
+            if (!clusterOneStore(bb, anchor, stores[i + g], crossLoadcnt)) break;
+            anchor = stores[i + g];  // chain: next store packs behind the one just moved
+            ++moved;
+        }
+        i += g;  // start a fresh group (fresh xcnt) after the packed run
+    }
+    return moved;
+}
+
 class EpilogueStoreSinkPass : public StinkyInstPass {
    public:
     static char ID;
     EpilogueStoreSinkPass(unsigned targetValu, unsigned tailGuard, bool reverseSink,
-                          bool crossLoadcnt, bool msbGuard)
+                          bool crossLoadcnt, bool msbGuard, unsigned clusterSize)
         : targetValu_(targetValu),
           tailGuard_(tailGuard),
           reverseSink_(reverseSink),
           crossLoadcnt_(crossLoadcnt),
-          msbGuard_(msbGuard) {}
+          msbGuard_(msbGuard),
+          clusterSize_(clusterSize) {}
 
     const char* getName() const override {
         return "EpilogueStoreSinkPass";
@@ -219,10 +286,13 @@ class EpilogueStoreSinkPass : public StinkyInstPass {
             if (!passCtx.shouldProcessBasicBlock(bb)) continue;
             const size_t moved = sinkStoresInBlock(bb, targetValu_, tailGuard_, reverseSink_,
                                                    crossLoadcnt_, msbGuard_);
+            const size_t clustered =
+                clusterStoresInBlock(bb, clusterSize_, tailGuard_, crossLoadcnt_);
             PASS_DEBUG(std::cerr << "[EpilogueStoreSinkPass] bb=\"" << bb.getLabel()
-                                 << "\" sunk_stores=" << moved << " target=" << targetValu_
-                                 << " tailGuard=" << tailGuard_ << " reverse=" << reverseSink_
-                                 << " crossLoadcnt=" << crossLoadcnt_ << " msbGuard=" << msbGuard_
+                                 << "\" sunk_stores=" << moved << " clustered=" << clustered
+                                 << " target=" << targetValu_ << " tailGuard=" << tailGuard_
+                                 << " reverse=" << reverseSink_ << " crossLoadcnt=" << crossLoadcnt_
+                                 << " msbGuard=" << msbGuard_ << " clusterSize=" << clusterSize_
                                  << "\n");
         }
         return preserveCFGAnalyses();
@@ -234,6 +304,7 @@ class EpilogueStoreSinkPass : public StinkyInstPass {
     bool reverseSink_;
     bool crossLoadcnt_;
     bool msbGuard_;
+    unsigned clusterSize_;
 };
 
 char EpilogueStoreSinkPass::ID = 0;
@@ -242,8 +313,8 @@ char EpilogueStoreSinkPass::ID = 0;
 namespace stinkytofu {
 std::unique_ptr<Pass> createEpilogueStoreSinkPass(unsigned targetValu, unsigned tailGuard,
                                                   bool reverseSink, bool crossLoadcnt,
-                                                  bool msbGuard) {
+                                                  bool msbGuard, unsigned clusterSize) {
     return std::make_unique<EpilogueStoreSinkPass>(targetValu, tailGuard, reverseSink, crossLoadcnt,
-                                                   msbGuard);
+                                                   msbGuard, clusterSize);
 }
 }  // namespace stinkytofu

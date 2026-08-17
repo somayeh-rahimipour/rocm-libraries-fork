@@ -102,7 +102,8 @@
     X(DsReadOrder, int)                           \
     X(ArchName, std::string)                      \
     X(EnableEpilogueSink, bool)                   \
-    X(EpilogueSinkMsbGuard, bool)
+    X(EpilogueSinkMsbGuard, bool)                 \
+    X(EpilogueSinkClusterSize, int)
 
 namespace stinkytofu {
 /**

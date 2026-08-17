@@ -63,10 +63,21 @@ class Pass;
 /// On NonEdge the neighbours share one msb bank so the clean landing == the full
 /// landing (no-op, wins preserved); on Edge it backs the store off before the first
 /// straddled flip, removing the forced xcnt at the cost of some va_vdst overlap.
+///
+/// `clusterSize`: store-clustering group size (0 or 1 = OFF). Runs AFTER the sink, in
+/// the OPPOSITE direction: instead of each store chasing its own va_vdst runway (which
+/// on Edge strands it across an msb flip → one forced s_wait_xcnt 0 per store), pack up
+/// to `clusterSize` consecutive stores adjacent so InsertVgprMsb emits ONE xcnt drain
+/// per group (b2b buffer_store is free). The intervening VALU moves below the store run,
+/// hiding its va_vdst behind the next batch. Breaks the xcnt<->overlap coupling msbGuard
+/// alone cannot: aims to turn Edge from "parity" into a win. Bounded per group so a long
+/// run does not serialize all its VALU behind a single drain. Experiment knob — sweep 0
+/// (off) / 2 / 4. Safe to combine with msbGuard.
 STINKYTOFU_EXPORT std::unique_ptr<Pass> createEpilogueStoreSinkPass(unsigned targetValu = 10,
                                                                     unsigned tailGuard = 2,
                                                                     bool reverseSink = true,
                                                                     bool crossLoadcnt = true,
-                                                                    bool msbGuard = false);
+                                                                    bool msbGuard = false,
+                                                                    unsigned clusterSize = 0);
 
 }  // namespace stinkytofu
