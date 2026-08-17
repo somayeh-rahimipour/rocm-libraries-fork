@@ -2,9 +2,10 @@
 
 ## Status
 
-- Planning phase: Phase 1 complete; Phase 2 research executed; Phase 2 **not
-  complete** (one build experiment and three owner decisions still block the
-  implementation plan). See [Phase 2 findings](#phase-2-findings) and
+- Planning phase: Phase 1 complete; Phase 2 **complete** (gating experiment run
+  and observed; the two owner decisions made). The implementation plan is
+  written: see [Step 7 implementation plan](#step-7-implementation-plan-in-tree-per-version-wheel).
+  See also [Phase 2 findings](#phase-2-findings) and
   [Phase 2 verdict](#phase-2-verdict).
 - Source ticket: [`ticket.md`](./ticket.md)
 - Implementation status: No implementation changes have been made
@@ -427,11 +428,14 @@ Phase 2 is complete when all of the following are true:
 
 ## Summary
 
-Phase 2 research is done; Phase 2 is **not** complete. Six of the eight
-decision-record rows remain OPEN, and the completeness review judged the evidence
-insufficient to write a file-level implementation plan. The blocker is not more
-reading -- it is one cheap build experiment plus three decisions only an owner can
-make.
+Phase 2 is now **complete**. The three blockers the research left open have been
+cleared: the gating build experiment ran and confirmed the static-embed premise
+by observation (see [Result](#result-observed-2026-08-17-static-embed-confirmed)),
+and the owner made the two policy decisions (in-tree wheel now; keep per-version
+3.10-3.13). The file-level implementation plan follows in
+[Step 7](#step-7-implementation-plan-in-tree-per-version-wheel). The research
+narrative below is preserved as-written for provenance; the decision record above
+reflects the resolved state.
 
 Three results overturn the direction the ticket assumed:
 
@@ -466,16 +470,16 @@ or a URL with a quote; unverifiable claims are marked.
 
 ## Decision record (Phase 2 result)
 
-| Decision | Selected / leading option | Status | Gated on |
+| Decision | Selected option | Status | Note |
 | --- | --- | --- | --- |
-| Binding repository | `ROCm/rocm-bindings` (placeholder; does not exist) | **OPEN** | Owner ratification of RFC #6050 |
-| Artifact boundary | Native `liborigami` from `rocm-libraries` via TheRock; wheel elsewhere | **PARTIAL** | Native side settled; Python side gated on binding repo |
-| Python ABI | Keep per-version build + version-specific packaging (shipped fix), OR raise floor to 3.12 for one `abi3` wheel | **OPEN** | Min-Python floor policy (owner/consumer) |
-| Linux loader | preload + register in `_dist_info.py` + **force shared link** | **OPEN** | Static-embed build-config fix + `readelf` proof |
-| Windows loader | `os.add_dll_directory` / `ctypes` preload by analogy | **OPEN** | No Windows build inspected; unverified |
-| `rocm_sdk` dependency | Required at runtime; preload before extension import | **OPEN** | Conditional on the loader build-config fix |
-| Package name | `rocm-origami` (revert in-tree `name = "origami"`) | **RESOLVED** | -- |
-| PyPI migration | Fix -> publish `0.0.3` -> verify in CI -> yank `0.0.2`/`0.0.1` | **OPEN** | Depends on ABI+loader fixes; internal credential owner |
+| Binding repository | **In-tree wheel from `rocm-libraries/shared/origami`** (interim), independent of RFC #6050 | **RESOLVED** | Owner decision (2026-08-17). Off the documented `rocm-bindings` direction; interim until RFC #6050 lands. |
+| Artifact boundary | Wheel built in-tree from `shared/origami`; TheRock keeps shipping native `liborigami` (`ENABLE_PYTHON=OFF`) | **RESOLVED** | Interim. The extension is *not* placed in any TheRock SDK component; it ships as a standalone wheel. |
+| Python ABI | **Per-CPython-version build, 3.10-3.13**, version-specific packaging | **RESOLVED** | Owner decision (2026-08-17). Corroborated by the observed `cp310-cp310` wheel tag. `abi3` split-mode revisited only after nanobind 3.0 GA. |
+| Linux loader | Force **shared** Origami link (`NEEDED liborigami.so.1`) + `preload_libraries` in `__init__.py` + register in `_dist_info.py`; keep `$ORIGIN` `INSTALL_RPATH` | **RESOLVED** | Static embed confirmed by `readelf` (no `liborigami` entry). Regression gate = `readelf -d` shows `NEEDED liborigami.so.1`. |
+| Windows loader | `os.add_dll_directory` / `ctypes` preload by analogy | **DEFERRED** | Interim is Linux-first; no Windows build inspected. Out of scope for the interim wheel. |
+| `rocm_sdk` dependency | Required at runtime; preload before extension import | **RESOLVED** | Follows from the loader decision. |
+| Package name | `rocm-origami` (revert in-tree `name = "origami"`) | **RESOLVED** | `origami` is an active unrelated PyPI project. |
+| PyPI migration | Fix -> publish `rocm-origami 0.0.3` -> verify in consumer CI -> yank `0.0.2`/`0.0.1`/`0.0.1.dev0` | **RESOLVED (sequence)** | Sequence set; the credential holder (PyPI owner) must still be identified internally to execute. |
 
 ## Findings by decision area
 
@@ -663,21 +667,213 @@ no outer `roc::origami` target, default `ORIGAMI_BUILD_FROM_SOURCE=ON`) and run
 This needs a ROCm/HIP build environment (a dev container), so it is the first
 Phase 3 action, not something completed in this planning pass.
 
+### Result (observed 2026-08-17): static embed confirmed
+
+**Evidence status: verified by observation.**
+
+The wheel was built via the real `pip` / `scikit-build-core` standalone path
+inside `rocm/dev-ubuntu-22.04` (ROCm on the image; no outer `roc::origami`
+target; default `ORIGAMI_BUILD_FROM_SOURCE=ON`). Reproduction script and log:
+[`.handoff/origami-py-phase2/readelf_experiment.sh`](./.handoff/origami-py-phase2/readelf_experiment.sh),
+`readelf_experiment.log`.
+
+- Built wheel: `origami-0.1.0-cp310-cp310-linux_x86_64.whl` -- a
+  **per-CPython-version** tag (`cp310-cp310`), not `abi3`. This directly
+  corroborates F2: the default build is version-specific.
+- Extension: `origami/origami.cpython-310-x86_64-linux-gnu.so`.
+- `readelf -d` on the extension shows `NEEDED` for `libamdhip64.so.7`,
+  `libstdc++.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libc.so.6`,
+  `ld-linux-x86-64.so.2` -- and **no `liborigami` entry of any kind**.
+
+This is the observation-grade confirmation of the static-embed premise that
+F3 (loader) and F5 (incident root cause) depend on: the standalone wheel
+statically embeds Origami and carries no dynamic dependency on the SDK's
+`liborigami.so.1`. It also fixes the regression gate: a correct fix must flip
+this same `readelf -d` output to include `NEEDED liborigami.so.1` (or
+`liborigami.so.X`). Note the extension *does* dynamically link
+`libamdhip64.so.7`, so the HIP-host runtime is already consumed dynamically;
+only Origami itself is embedded.
+
 ## Phase 2 verdict
 
-Phase 2 is **not** complete. Against its own definition of done: the owning
-repository is unconfirmed (F1), the ABI strategy is an unresolved policy choice
-(F2), the loader contract is missing its mandatory build-config half until the
-`readelf` experiment runs (F3), the user-facing artifact boundary is gated on the
-repository decision (F4), and the deprecation owner is internal-only (F6). The
-incident is accurately weakened rather than verified (F5). Only the package name
-(F6) is fully resolved.
+Phase 2 is **complete**. The three conditions the earlier verdict set as
+prerequisites are all met:
 
-Do not proceed to an implementation plan until:
+1. The static-embed experiment ran and its result is recorded (verified by
+   observation: no `NEEDED liborigami` on the built extension).
+2. The binding-home decision is made: an **in-tree per-version wheel** from
+   `rocm-libraries/shared/origami` as the interim, explicitly independent of the
+   still-open RFC #6050. This is an interim choice off the documented
+   `rocm-bindings` direction; when RFC #6050 lands, the wheel source can be
+   relocated without changing the loader/ABI contract.
+3. The minimum supported Python is set: **3.10-3.13, built per version**.
 
-1. the static-embed experiment above has run and its result is recorded;
-2. an owner ratifies the binding repository / governance (RFC #6050);
-3. an owner sets the minimum supported Python version, which selects the ABI
-   strategy.
+F5 (incident) remains accurately *weakened* rather than fully verified -- the
+struct-growth mechanism and static embed are proven, but the ticket's exact
+112/128 sizes and the ROCM-29472 causal chain stay unverified because the
+internal issue is inaccessible. That does not block the plan: the fix (dynamic
+link to one `liborigami`) removes the two-implementations condition regardless of
+the exact byte counts.
 
-Proceeding without these repeats the land/revert pattern the work exists to end.
+Residual, non-blocking follow-ups carried into execution: the Windows loader is
+deferred (Linux-first interim), and the PyPI credential holder must be identified
+internally to execute the yank sequence.
+
+---
+
+# Step 7 implementation plan (in-tree per-version wheel)
+
+## Summary
+
+Ship an official `rocm-origami` wheel built in-tree from
+`rocm-libraries/shared/origami`, one wheel per CPython version for 3.10-3.13.
+The single change that removes the incident's root cause is to stop statically
+embedding Origami in the extension: build `liborigami` as a shared library,
+give the extension a real `NEEDED liborigami.so.1`, and preload the ROCm SDK's
+`liborigami` **before** importing the extension so the dynamic linker resolves
+both the extension and any co-loaded consumer to one shared object.
+
+This is an **interim** architecture. It is off the documented `rocm-bindings`
+direction (RFC #6050, still open) and was chosen to unblock a fix now. When the
+binding repository lands, the wheel *source* can move without changing the
+loader or ABI contract defined here.
+
+## Selected architecture and why
+
+The extension today carries its own static copy of Origami. The standalone
+wheel build leaves `ORIGAMI_BUILD_SHARED_LIBS` at its default -- which is
+`ORIGAMI_STANDALONE` (`shared/origami/CMakeLists.txt:23`), and standalone is
+false inside the nested wheel build -- so `ORIGAMI_LIBRARY_TYPE` becomes
+`STATIC` (`shared/origami/CMakeLists.txt:30-34`) and the extension links it
+`PRIVATE` (`shared/origami/python/CMakeLists.txt:67`). The built extension
+therefore has no `liborigami` dynamic dependency, confirmed by `readelf`
+(see the experiment result above).
+
+The fix is to force a shared Origami and bundle it in the wheel:
+
+1. **Force shared link.** Pass `-DORIGAMI_BUILD_SHARED_LIBS=ON` at wheel-build
+   time. This flips `ORIGAMI_LIBRARY_TYPE` to `SHARED`
+   (`shared/origami/CMakeLists.txt:30-31`); the extension then emits
+   `NEEDED liborigami.so.1`.
+2. **Preload the SDK copy first, then import.** `__init__.py` currently imports
+   the extension directly with no preload
+   (`shared/origami/python/src/origami/__init__.py:12`). Preloading the SDK's
+   `liborigami.so.1` with `RTLD_GLOBAL` before the import makes the dynamic
+   linker satisfy the extension's `NEEDED liborigami.so.1` from the
+   already-loaded object -- SONAME-based deduplication. A co-loaded consumer
+   (hipBLASLt, PyTorch) linking the same SONAME resolves to the same object, so
+   only one Origami implementation exists in the process.
+3. **Bundle a fallback `liborigami.so.1` in the wheel** next to the extension,
+   so the package imports even when the SDK is absent. `$ORIGIN` on the
+   extension's RPATH finds the sibling copy only when nothing has already
+   loaded that SONAME.
+
+Why this removes the incident: the crash needs *two* Origami copies with
+different `problem_t` layouts in one process. A static embed cannot be
+deduplicated by the linker; a shared object with a stable SONAME can. Preload
+ordering is what guarantees the SDK copy wins.
+
+### Rejected / alternative approaches
+
+- **Build the extension against the SDK library, ship no `liborigami` in the
+  wheel** (`ORIGAMI_BUILD_FROM_SOURCE=OFF` + `find_package(origami)`,
+  `shared/origami/python/CMakeLists.txt:27-29`). This is the *stronger* form --
+  the wheel then carries zero Origami implementation and cannot diverge from the
+  SDK. It was **not** chosen for the interim because it hard-requires the SDK's
+  `liborigami` to be present and discoverable at build and run time, which the
+  standalone-wheel install story does not yet guarantee. **This becomes the
+  preferred design once the wheel is produced inside a ROCm SDK build** (e.g. in
+  the eventual `rocm-bindings` home); revisit it then.
+- **One `abi3` wheel across 3.10-3.13.** Rejected: nanobind's abi3 "split mode"
+  is unreleased (nanobind 3.0; stable is 2.15.0, and the package pins
+  `nanobind>=2.0.0`, `shared/origami/python/pyproject.toml:27`), and linked
+  `STABLE_ABI` has a 3.12 floor that would drop 3.10/3.11. Owner set the floor
+  at 3.10, so per-version builds stand.
+
+## Repositories and files to modify
+
+All changes are in `rocm-libraries/shared/origami`; no TheRock change is
+required for the interim wheel (TheRock keeps `ORIGAMI_ENABLE_PYTHON=OFF`,
+`shared/origami/CMakeLists.txt:24`).
+
+| File | Change |
+| --- | --- |
+| `python/pyproject.toml:17` | `name = "origami"` -> `name = "rocm-origami"`. `origami` is an active unrelated PyPI project. |
+| `python/pyproject.toml:48-53` | Add `-DORIGAMI_BUILD_SHARED_LIBS=ON` to the wheel CMake args so the nested Origami builds `SHARED`. |
+| `python/pyproject.toml` `[tool.scikit-build]` | Install/stage the built `liborigami.so.1` into the wheel's `origami/` package dir so it ships beside the extension. |
+| `python/CMakeLists.txt:88-92` | Keep the merged `$ORIGIN`-relative `INSTALL_RPATH`; add plain `$ORIGIN` so the extension finds the sibling bundled `liborigami.so.1`. Do **not** switch to `INSTALL_RPATH_USE_LINK_PATH` (bakes absolute host paths). |
+| `python/src/origami/__init__.py:10-12` | Before `from .origami import ...`, attempt `rocm_sdk.preload_libraries("origami")` (or the exact SDK API/name); on `ImportError`/absence, fall back to the bundled copy. Keep the existing actionable `ImportError` message. |
+| `python/pyproject.toml:21` | Leave `requires-python = ">=3.9"` or raise to `>=3.10` to match the supported floor; building 3.10-3.13 per version regardless. |
+
+Cross-repo dependency (not in this repo): `rocm_sdk` must register `origami` in
+`_dist_info.py` for `preload_libraries("origami")` to resolve the SDK copy.
+F3 found Origami absent there. Until that registration lands, preload falls back
+to the bundled `liborigami.so.1`; single-copy consumption of the SDK library is
+only guaranteed once registration exists. Track this as an execution dependency.
+
+## ABI and build matrix
+
+- Per CPython version: 3.10, 3.11, 3.12, 3.13. Four Linux wheels, tagged
+  `cpXY-cpXY` (the experiment produced `cp310-cp310`, confirming the tag shape).
+- Each wheel bundles a `liborigami.so.1` built from the same source revision as
+  its extension, so bundled extension and bundled library never disagree on
+  `problem_t` layout.
+- Windows: deferred. Not built in the interim.
+
+## Loader contract (Linux, observable)
+
+- The extension MUST show `NEEDED liborigami.so.1` under `readelf -d`.
+- Import order MUST be preload-then-import inside `__init__.py`.
+- With the SDK present and registered, importing `origami` after or before
+  hipBLASLt/PyTorch MUST resolve to a single `liborigami.so.1` mapping (checkable
+  via `/proc/self/maps` or `ctypes` handle identity in a test).
+
+## Artifact accounting (wheel contents)
+
+The wheel ships exactly: the per-version extension
+(`origami/origami.cpython-XY-*.so`), the bundled `origami/liborigami.so.1`, the
+Python sources (`__init__.py`, `selector.py`), and metadata/license. Tests are
+excluded from the wheel (already excluded, `pyproject.toml:66-72`). No file is
+placed in any TheRock SDK component in the interim.
+
+## Tests
+
+- **Per-version import test:** in each of 3.10-3.13, `import origami` succeeds
+  and a representative binding call runs (extend the existing
+  `tests/test_origami.py`, wired at `python/CMakeLists.txt:109-113`).
+- **Linker gate:** `readelf -d` on the built extension asserts
+  `NEEDED liborigami.so.1` is present -- the inverse of the current experiment.
+  Reuse `.handoff/origami-py-phase2/readelf_experiment.sh` as the harness.
+- **Collision regression test:** in one process, load a second Origami copy
+  (or the SDK's `liborigami` alongside the extension) and exercise a `problem_t`
+  round-trip through `select_config`; assert no crash and consistent
+  `sizeof(problem_t)`. The struct that grew is `problem_t` (+16 bytes:
+  `num_cus`, `q_heads`), bound in `bindings.cpp` -- this is the type whose layout
+  skew caused the incident. The pass condition is a single mapped
+  `liborigami.so.1`.
+- Note on evidence: passing these records the behavior; the ticket's exact
+  112/128 byte figures remain unverified (ROCM-29472 inaccessible), so the
+  regression test asserts single-copy + no-crash, not those specific sizes.
+
+## Rollout, deprecation, rollback
+
+1. Land the source changes above; CI builds and import-tests all four wheels and
+   runs the linker gate + collision regression.
+2. Publish `rocm-origami 0.0.3`.
+3. Verify install + import across the consumer (PyTorch) CI Python matrix.
+4. Only then yank `rocm-origami 0.0.2`, `0.0.1`, `0.0.1.dev0` to close the
+   window where the static-embed sdist can still be installed.
+5. **Rollback:** if 0.0.3 regresses, do not yank the predecessors; the fix is
+   self-contained to the wheel, so reverting the four wheels restores 0.0.2
+   behavior. The PyPI credential holder must be identified internally to execute
+   publish/yank.
+
+## Measurable completion criteria
+
+- `readelf -d` on every shipped extension shows `NEEDED liborigami.so.1`.
+- `import origami` succeeds on 3.10, 3.11, 3.12, 3.13.
+- The collision regression test passes with exactly one `liborigami.so.1`
+  mapping in the process.
+- `rocm-origami 0.0.3` is installable and importable in the consumer CI matrix;
+  predecessors are yanked.
+- No file from the wheel lands in a TheRock SDK component.
