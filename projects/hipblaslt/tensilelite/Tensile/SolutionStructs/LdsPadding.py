@@ -39,6 +39,8 @@ Public API (see each `def` for the full signature):
   get_fp16_mt_config -- FP16      ds_load_tr16_b128 padding
   get_fp32_mt_config -- FP32/TF32 ds_load_b32       padding
   get_mxs_mt_config  -- MX scale tensor padding
+  local_read_block_width / local_read_instruction_bytes -- LDS local-read
+                        instruction geometry, shared with the kernel writer
 
   key is one of "perBlock", "pad", "shift" (FP4/FP8 only for "shift").
 """
@@ -410,3 +412,41 @@ def _compute_mxs_config(matrixInstK: int, mxBlock: int, vw: int) -> Dict[str, in
 
 def get_mxs_mt_config(matrixInstK: int, mxBlock: int, vw: int, key: str) -> int:
   return _compute_mxs_config(matrixInstK, mxBlock, vw)[key]
+
+
+# ---------------------------------------------------------------------------
+# Local-read instruction geometry
+# ---------------------------------------------------------------------------
+# blockWidth (in registers) of each entry of memoryInstructions["LocalRead"],
+# widest first -- see KernelWriter.py where the table is built:
+#     _ds_load_b192 (6), _ds_load_b128 (4), _ds_load2_b64 (2), _ds_load_b64 (2),
+#     _ds_load2_b32 (1), _ds_load_b32 (1), _ds_load_u16, _ds_load_u8
+# Kept here rather than in KernelWriter so that solution derivation, which runs
+# long before a KernelWriter exists, can ask the same question codegen asks.
+LOCAL_READ_BLOCK_WIDTHS = (6, 4, 2, 2, 1, 1)
+
+# Bytes per register; mirrors StateValues.bpr ("all registers are 32bit").
+# Note this is a VGPR property and is only numerically equal to the LDS bank
+# width by coincidence -- do not substitute one for the other.
+BYTES_PER_REGISTER = 4
+
+
+def local_read_block_width(widthRegisters: int) -> int:
+    """Registers moved per lane by ONE local-read instruction.
+
+    Mirrors KernelWriterAssembly.findMemoryInstructionForWidthStride() for the
+    non-combining case: walk the widest-first table and take the first entry
+    that is no wider than the request and divides it evenly. A request wider
+    than any entry is issued as several instructions, e.g. 8 registers is not
+    divisible by b192's 6, so it becomes two b128s of 4.
+    """
+    for blockWidth in LOCAL_READ_BLOCK_WIDTHS:
+        if widthRegisters >= blockWidth and widthRegisters % blockWidth == 0:
+            return blockWidth
+    return 1
+
+
+def local_read_instruction_bytes(lrvw: int, numBytes: float) -> int:
+    """Bytes per lane moved by ONE local-read instruction, for this operand."""
+    widthRegisters = int(lrvw * numBytes // BYTES_PER_REGISTER)
+    return local_read_block_width(widthRegisters) * BYTES_PER_REGISTER

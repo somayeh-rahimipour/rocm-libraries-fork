@@ -40,7 +40,8 @@ from Tensile.Common import assignParameterWithDefault, IsaInfo, \
 from Tensile.Common.DataType import DataType
 from Tensile.Common.TypeValidationErrors import ConfigTypeError
 from Tensile.SolutionStructs.LdsPadding import get_fp4_mt_config, get_fp8_mt_config, get_mxs_mt_config, \
-                                               get_fp16_mt_config, get_fp32_mt_config
+                                               get_fp16_mt_config, get_fp32_mt_config, \
+                                               local_read_instruction_bytes
 from Tensile.Common.GlobalParameters import defaultSolution, \
                                             defaultInternalSupportParams
 from Tensile.Common.ValidParameters import validParameters, \
@@ -3188,8 +3189,20 @@ class Solution(collections.abc.Mapping):
         ldsPadA = state["LdsPadA"]
         ldsPadB = state["LdsPadB"]
         ldsPadM = state["LdsPadMetadata"]
-        optPadA = lrvwA
-        optPadB = lrvwB
+        # optPad is a pad of one local-read width. The bank-conflict rule is in
+        # units of ONE local-read instruction, and those coincide only while
+        # lrvw*bpe fits a single instruction. gfx11/12 WMMA forces
+        # LocalReadVectorWidth == MIInputPerThread (16 for 16-bit, 32 for 8-bit),
+        # issued as two ds_read_b128, so an unclamped optPad is two instruction
+        # widths -- an even multiple, and an even multiple cannot change the
+        # parity of the row stride, i.e. it cannot fix a conflict at all.
+        #
+        # Clamping here, before the MI16x16 doubling below, keeps that rule
+        # acting on real instruction widths. It is a no-op wherever a row is a
+        # single instruction, which is every case MFMA/CDNA can reach (the b192
+        # reject below caps non-WMMA at 6 registers), so CDNA layouts do not move.
+        optPadA = min(lrvwA, int(local_read_instruction_bytes(lrvwA, numBytesA) // numBytesA))
+        optPadB = min(lrvwB, int(local_read_instruction_bytes(lrvwB, numBytesB) // numBytesB))
         readRegsA = int(lrvwA * state["ProblemType"]["MacDataTypeA"].numBytes() // 4)
         readRegsB = int(lrvwB * state["ProblemType"]["MacDataTypeB"].numBytes() // 4)
         if state["ProblemType"]["Sparse"]:
