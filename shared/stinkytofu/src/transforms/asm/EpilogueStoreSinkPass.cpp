@@ -12,6 +12,7 @@
 #include "stinkytofu/core/BasicBlock.hpp"
 #include "stinkytofu/core/PassManager.hpp"
 #include "stinkytofu/ir/asm/StinkyAsmIR.hpp"
+#include "stinkytofu/ir/asm/VgprMsbEncoding.hpp"
 
 #define DEBUG_TYPE "EpilogueStoreSinkPass"
 
@@ -62,13 +63,33 @@ static bool isPureLoadcntWait(const StinkyInstruction& inst) {
     return inst.getUnifiedOpcode() == GFX::s_wait_loadcnt;
 }
 
+// Predicted s_set_vgpr_msb value an instruction will require, or -1 if it carries
+// no VGPR MSB (SALU, waits, side-effecting). Uses computeRequiredMsb — the SAME
+// shared predictor InsertVgprMsbPass materializes from — so the flip boundaries we
+// see here at sink time (before any s_set_vgpr_msb exists) are exactly the ones
+// that pass will emit. This is how the guard is "MSB-aware" without the msb IR.
+static int requiredMsbOf(const StinkyInstruction& inst) {
+    auto [setVal, hasVgpr] = computeRequiredMsb(&inst);
+    return hasVgpr ? setVal : -1;
+}
+
 // Sink one buffer_store within its block.
 // storeIt points at the store; the [msb?/wait] preceding it are left in place
 // (regenerated later by InsertVgprMsb / InsertWaitAlu).
 //
 // Returns the number of VALU ops the store was sunk past (0 = not moved).
+//
+// msbGuard: when true, stop sinking at the last landing where the store does NOT
+// straddle an s_set_vgpr_msb flip. A store left in flight across a (non-replayable)
+// msb forces InsertVgprMsbPass to emit s_wait_xcnt 0 (§5.2/§8.3): the fold rule
+// only fires when the msb immediately precedes its own VMEM, not when a store sits
+// between the msb and the VALU it configures. On NonEdge the store's neighbours
+// share one msb bank, so the last clean landing == the full targetValu landing —
+// the guard is a no-op and the +26%/+6% wins are preserved. On Edge every element
+// flips the bank 3x, so the guard backs the store off before the first straddled
+// flip, trading a little va_vdst overlap for removing a forced xcnt drain.
 static unsigned sinkOneStore(BasicBlock& bb, BasicBlock::iterator storeIt, unsigned targetValu,
-                             bool crossLoadcnt) {
+                             bool crossLoadcnt, bool msbGuard) {
     StinkyInstruction& store = getStinkyInst(storeIt);
 
     // The store's dependency footprint:
@@ -80,9 +101,25 @@ static unsigned sinkOneStore(BasicBlock& bb, BasicBlock::iterator storeIt, unsig
     std::set<RegUnit> readUnits;
     collectUnits(store.getSrcRegs(), readUnits);
 
+    // MSB context in effect just before the store: the required-msb of the nearest
+    // preceding computable instruction. A later inst whose required-msb differs is
+    // a flip the store would straddle if it lands after that inst.
+    int curMsb = -1;
+    if (msbGuard) {
+        for (BasicBlock::iterator b = storeIt; b != bb.begin();) {
+            --b;
+            auto* p = dyn_cast<StinkyInstruction>(b.getNodePtr());
+            if (!p) break;
+            int m = requiredMsbOf(*p);
+            if (m >= 0) { curMsb = m; break; }
+        }
+    }
+
     BasicBlock::iterator it = std::next(storeIt);
     BasicBlock::iterator dest = storeIt;  // last legal insertion point (before `it`)
+    BasicBlock::iterator cleanDest = storeIt;  // last msb-clean landing (guard on)
     unsigned valuPassed = 0;
+    unsigned valuAtCleanDest = 0;  // VALU passed as of the last msb-clean landing
 
     while (it != bb.end() && valuPassed < targetValu) {
         IRBase* node = it.getNodePtr();
@@ -105,6 +142,22 @@ static unsigned sinkOneStore(BasicBlock& bb, BasicBlock::iterator storeIt, unsig
         if (bumpsVaVdst(cand)) ++valuPassed;
         ++it;
         dest = std::prev(it);
+
+        // Track the furthest landing that does not straddle an msb flip. Landing
+        // after `cand` is clean iff the MSB in effect has not changed since the
+        // store's original position; the first differing required-msb marks the
+        // flip the store must not cross.
+        if (msbGuard) {
+            int m = requiredMsbOf(cand);
+            if (m >= 0 && m != curMsb) break;  // flip — stop before straddling it
+            cleanDest = dest;
+            valuAtCleanDest = valuPassed;
+        }
+    }
+
+    if (msbGuard) {
+        dest = cleanDest;
+        valuPassed = valuAtCleanDest;
     }
 
     if (valuPassed == 0) return 0;  // no room / nothing to gain
@@ -117,7 +170,7 @@ static unsigned sinkOneStore(BasicBlock& bb, BasicBlock::iterator storeIt, unsig
 }
 
 size_t sinkStoresInBlock(BasicBlock& bb, unsigned targetValu, unsigned tailGuard, bool reverseSink,
-                         bool crossLoadcnt) {
+                         bool crossLoadcnt, bool msbGuard) {
     size_t moved = 0;
     // Snapshot store iterators first: moving one store must not disturb the walk.
     std::vector<BasicBlock::iterator> stores;
@@ -137,7 +190,7 @@ size_t sinkStoresInBlock(BasicBlock& bb, unsigned targetValu, unsigned tailGuard
     // earlier store's snapshot iterator (different node), so reverse is safe.
     for (size_t k = 0; k < sinkCount; ++k) {
         const size_t i = reverseSink ? (sinkCount - 1 - k) : k;
-        if (sinkOneStore(bb, stores[i], targetValu, crossLoadcnt) > 0) ++moved;
+        if (sinkOneStore(bb, stores[i], targetValu, crossLoadcnt, msbGuard) > 0) ++moved;
     }
     return moved;
 }
@@ -146,11 +199,12 @@ class EpilogueStoreSinkPass : public StinkyInstPass {
    public:
     static char ID;
     EpilogueStoreSinkPass(unsigned targetValu, unsigned tailGuard, bool reverseSink,
-                          bool crossLoadcnt)
+                          bool crossLoadcnt, bool msbGuard)
         : targetValu_(targetValu),
           tailGuard_(tailGuard),
           reverseSink_(reverseSink),
-          crossLoadcnt_(crossLoadcnt) {}
+          crossLoadcnt_(crossLoadcnt),
+          msbGuard_(msbGuard) {}
 
     const char* getName() const override {
         return "EpilogueStoreSinkPass";
@@ -163,12 +217,13 @@ class EpilogueStoreSinkPass : public StinkyInstPass {
     PreservedAnalyses run(Function& func, PassContext& passCtx, AnalysisManager& /*AM*/) override {
         for (BasicBlock& bb : func) {
             if (!passCtx.shouldProcessBasicBlock(bb)) continue;
-            const size_t moved =
-                sinkStoresInBlock(bb, targetValu_, tailGuard_, reverseSink_, crossLoadcnt_);
+            const size_t moved = sinkStoresInBlock(bb, targetValu_, tailGuard_, reverseSink_,
+                                                   crossLoadcnt_, msbGuard_);
             PASS_DEBUG(std::cerr << "[EpilogueStoreSinkPass] bb=\"" << bb.getLabel()
                                  << "\" sunk_stores=" << moved << " target=" << targetValu_
                                  << " tailGuard=" << tailGuard_ << " reverse=" << reverseSink_
-                                 << " crossLoadcnt=" << crossLoadcnt_ << "\n");
+                                 << " crossLoadcnt=" << crossLoadcnt_ << " msbGuard=" << msbGuard_
+                                 << "\n");
         }
         return preserveCFGAnalyses();
     }
@@ -178,6 +233,7 @@ class EpilogueStoreSinkPass : public StinkyInstPass {
     unsigned tailGuard_;
     bool reverseSink_;
     bool crossLoadcnt_;
+    bool msbGuard_;
 };
 
 char EpilogueStoreSinkPass::ID = 0;
@@ -185,8 +241,9 @@ char EpilogueStoreSinkPass::ID = 0;
 
 namespace stinkytofu {
 std::unique_ptr<Pass> createEpilogueStoreSinkPass(unsigned targetValu, unsigned tailGuard,
-                                                  bool reverseSink, bool crossLoadcnt) {
-    return std::make_unique<EpilogueStoreSinkPass>(targetValu, tailGuard, reverseSink,
-                                                   crossLoadcnt);
+                                                  bool reverseSink, bool crossLoadcnt,
+                                                  bool msbGuard) {
+    return std::make_unique<EpilogueStoreSinkPass>(targetValu, tailGuard, reverseSink, crossLoadcnt,
+                                                   msbGuard);
 }
 }  // namespace stinkytofu

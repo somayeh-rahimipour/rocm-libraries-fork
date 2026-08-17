@@ -404,6 +404,11 @@ globalParameters["StinkyTofuCostOutputDir"] = ""
 # late as legal so InsertWaitAlu emits graduated va_vdst(N) instead of va_vdst(0).
 globalParameters["StinkyTofuEnableEpilogueSink"] = True
 
+# MSB-aware xcnt guard for the epilogue sink (gfx1250): stop a store before it
+# straddles an s_set_vgpr_msb flip so InsertVgprMsb is not forced to emit
+# s_wait_xcnt 0. Off by default = unconditional sink; on = sweep the guard.
+globalParameters["StinkyTofuEpilogueSinkMsbGuard"] = False
+
 globalParameters["DisableSTWaitCnt"] = False
 
 # Internal plumbing for the --cpu-only CLI switch (see Tensile.py addCommonArguments).

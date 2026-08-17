@@ -6795,6 +6795,10 @@ class KernelWriter(metaclass=abc.ABCMeta):
                                # Epilogue store-sink experiment (gfx1250): sink global-write stores
                                # so InsertWaitAlu emits graduated va_vdst(N). Off by default.
                                "EnableEpilogueSink": bool(globalParameters.get("StinkyTofuEnableEpilogueSink") or False),
+                               # MSB-aware xcnt guard for the epilogue sink: back a store off before
+                               # it straddles an s_set_vgpr_msb flip (which would force s_wait_xcnt 0).
+                               # Off = unconditional sink (current uplifted behaviour).
+                               "EpilogueSinkMsbGuard": bool(globalParameters.get("StinkyTofuEpilogueSinkMsbGuard") or False),
                                "TileA0": kernel["ThreadTile0"],
                                "TileB0": kernel["ThreadTile1"],
                                "TileM0": kernel["MacroTile0"],

@@ -101,7 +101,8 @@
     X(GlobalReadDrainLatency, int)                \
     X(DsReadOrder, int)                           \
     X(ArchName, std::string)                      \
-    X(EnableEpilogueSink, bool)
+    X(EnableEpilogueSink, bool)                   \
+    X(EpilogueSinkMsbGuard, bool)
 
 namespace stinkytofu {
 /**

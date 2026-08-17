@@ -54,9 +54,19 @@ class Pass;
 /// followed by s_wait_loadcnt on the next row's C-load — without this the store
 /// stalls at va_vdst(0) and gets no overlap. Still stops at s_wait_storecnt, the
 /// combined *_dscnt waits, other stores, and any writesAny data hazard.
+/// `msbGuard`: MSB-aware xcnt cost guard. Sink runs before InsertVgprMsbPass, so no
+/// s_set_vgpr_msb exists yet; the guard predicts the flip boundaries via the shared
+/// computeRequiredMsb() (the same one that pass materializes) and stops a store at
+/// the last landing that does not straddle an msb flip. A straddled flip forces
+/// InsertVgprMsbPass to emit s_wait_xcnt 0 (the store is in flight across a
+/// non-replayable msb). Off = the unconditional sink (current uplifted behaviour).
+/// On NonEdge the neighbours share one msb bank so the clean landing == the full
+/// landing (no-op, wins preserved); on Edge it backs the store off before the first
+/// straddled flip, removing the forced xcnt at the cost of some va_vdst overlap.
 STINKYTOFU_EXPORT std::unique_ptr<Pass> createEpilogueStoreSinkPass(unsigned targetValu = 10,
                                                                     unsigned tailGuard = 2,
                                                                     bool reverseSink = true,
-                                                                    bool crossLoadcnt = true);
+                                                                    bool crossLoadcnt = true,
+                                                                    bool msbGuard = false);
 
 }  // namespace stinkytofu
