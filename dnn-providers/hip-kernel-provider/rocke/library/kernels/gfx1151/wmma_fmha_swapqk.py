@@ -83,6 +83,7 @@ __all__ = [
     "swapqk_transpose_v",
     "swapqk_num_work_items",
     "swapqk_persistent_grid",
+    "swapqk_causal_kv_stop",
 ]
 
 _WMMA_OP_ID = "wmma_f32_16x16x16_f16"
@@ -187,9 +188,20 @@ class SwapQKCfg:
     # block_n does block_n/16 QK+PV WMMA sub-steps per iteration and rescales the
     # O accumulator only ONCE per block_n keys (vs once per 16) -- amortizes the
     # online-softmax fixed cost + adds WMMA ILP, at the price of block_n/16 live
-    # score/P fragments. seqlen_k must be a multiple of block_n. bn64 is the
-    # measured winner and only fits spill-free because dual_gather pays for it;
-    # bn128 collapses on VGPR.
+    # score/P fragments.
+    #
+    # CORRECTNESS: seqlen_k MUST be a multiple of block_n. The kv loop bound is
+    # `loop_stop = seqlen_k / block_n` (plain integer division, see the K-loop
+    # setup) -- the tail is TRUNCATED, not masked, so a non-divisible launch is
+    # a wrong answer rather than a slow one. Callers must gate on this.
+    #
+    # PERF: the winner is SEQUENCE-DEPENDENT, so 64 is a default, not a verdict.
+    # bn64 fits spill-free (216 VGPR) because dual_gather pays for it. bn128 does
+    # reach the 256 VGPR ceiling and spill 112 B -- and wins anyway once the kv
+    # working set outgrows the 2 MB L2, because on this part spilling is cheaper
+    # than L0 thrash: -28%/-32%/-18% at S=1024/2048/3072 but +13%/+29% at
+    # S=4096/8192 (Hq32/Hk8/D128 causal, gqa_fuse=4). bn256 spills 632 B and
+    # loses everywhere. See rocke/docs/long_seq_scaling_08_17_2026.md.
     block_n: int = 64
     # prefetch_v: software-pipeline the PV V-gather so the strided loads are
     # hidden behind compute. The first fragment's gather is issued BEFORE the
@@ -563,7 +575,18 @@ class SwapQKCfg:
     #
     # MQ>1 has its own QK loop that already hoists K across query groups; this
     # knob is rejected there rather than silently doing nothing.
-    qk_douter: bool = True
+    #
+    # RETRACTION -- the +3.3% above does not reproduce, and the SIGN is wrong.
+    # Re-measured with 4 reps per cell, round-robin in BOTH directions, every run
+    # numpy-gated: -4.7% at the README's own H24 MHA S2048 dense shape and -35.7%
+    # at the vLLM Hq32/Hk8 GQA S2048 causal shape. SQ_BUSY_CYCLES agrees in sign
+    # at both corners (1.07x and 1.71x penalty) at an identical SQ_WAVES, as does
+    # TA_TA_BUSY. The original figure most likely came from a single
+    # non-interleaved A/B on a box that up-clocks as it warms -- the exact failure
+    # mode this file documents in the fuse_k+sched retraction. Default is now
+    # False; the True path is kept because the d-outer nesting is still the right
+    # structure to revisit if the texture-address path stops being the limiter.
+    qk_douter: bool = False
     # A NOTE on the register peak, since it is what caps this kernel. qk_douter
     # keeps all n_kv_sub score accumulators AND all n_kv_sub K fragments live (at
     # bn64: 32 + 32 VGPR), which pins it at 199 VGPR = 7 waves/SIMD. The 8th wave is
@@ -703,6 +726,36 @@ class SwapQKCfg:
     #                   slower at L=16K, which is the measurement that proves the
     #                   schedule's locality is what matters)
     persist_decode: str = "qb_major"
+    # gqa_fuse (F): fold F query heads that share a kv head into ONE CTA, one
+    # head per wave. The CTA's waves split two ways -- head_slot = wave%F picks
+    # the query head, q_wave = wave/F picks the 16-row query block -- so
+    # q_rows_per_cta is UNCHANGED and each wave still owns exactly one head's O
+    # accumulators. Per-wave register pressure is therefore identical, which is
+    # the whole point: at 216 VGPR against a 256 ceiling this is the only
+    # formulation of head fusion that fits.
+    #
+    # What it buys: a K/V tile is fetched once and consumed by F*n_waves*16
+    # query rows instead of n_waves*16 (128 vs 32 at F=4,W=2) -- Triton's
+    # BLOCK_M=128 arithmetic intensity, reached without the register cost of the
+    # q_block/MQ lever that does not fit at D=128. Aimed at the 2.4x TA_TA_BUSY
+    # gap vs Triton at the Qwen3-8B prefill shape (Hq32/Hk8/D128/causal).
+    #
+    # NOTE when measuring: the win needs the F waves running IN phase, and
+    # sched_mode="pingpong" exists to drive them OUT of phase (as does
+    # lazy_rescale, whose 0/1-trip loop has a per-head trip count). A/B those
+    # in the same session or a real win can read as a null.
+    #
+    # Measured Hq32/Hk8/D128/S2048 causal, qk_douter=False, best config per arm:
+    # F=4 is 1.67x on wall clock, TA_TA_BUSY 24.4M -> 12.5M and SQ_BUSY 118.8M ->
+    # 65.0M at an identical SQ_WAVES of 4096 and an unchanged 216 VGPR / 0
+    # scratch. A pure dispatch swizzle that only co-locates the sharing heads in
+    # DISPATCH order (rather than in a CTA) recovers about half of that -- so the
+    # cost is partly temporal, but mostly the CUs not sharing the fetch.
+    #
+    # It is a CONSTANT-FACTOR fix, not a scaling fix: the gain runs 1.17x at
+    # S=1024 to 2.06x at S=8192, but the super-linear growth in L is untouched,
+    # so Triton still overtakes the fused kernel at S ~ 3.3K.
+    gqa_fuse: int = 1
     name: str = "wmma_fmha_swapqk"
 
     @property
@@ -711,7 +764,9 @@ class SwapQKCfg:
 
     @property
     def block_size(self) -> int:
-        return 32 * self.n_waves
+        # gqa_fuse widens the CTA (more waves); q_rows_per_cta below must NOT
+        # follow -- the extra waves serve extra HEADS, not extra query rows.
+        return 32 * self.n_waves * self.gqa_fuse
 
     @property
     def q_rows_per_cta(self) -> int:
@@ -761,6 +816,9 @@ class SwapQKCfg:
                 else "oneshot"
             ),
             f"iglp{self.iglp}" if self.iglp >= 0 else "noiglp",
+            # keep F==1 names byte-identical to the pre-fusion kernel, but NEVER
+            # let a fused build share a cache key with the unfused one.
+            *((f"gf{self.gqa_fuse}",) if self.gqa_fuse > 1 else ()),
         )
 
 
@@ -795,6 +853,31 @@ def is_valid_spec(cfg: SwapQKCfg, arch: str = "gfx1151") -> "tuple[bool, str]":
         return False, f"n_waves must be 1 or 2 (got {cfg.n_waves})"
     if cfg.mask_mode not in ("none", "causal"):
         return False, f"mask_mode must be 'none' or 'causal' (got {cfg.mask_mode!r})"
+    if cfg.gqa_fuse < 1:
+        return False, f"gqa_fuse must be >= 1 (got {cfg.gqa_fuse})"
+    if cfg.gqa_fuse > 1:
+        if not cfg.num_kv_heads:
+            return False, "gqa_fuse needs an explicit num_kv_heads"
+        ratio = cfg.num_query_heads // cfg.kv_heads
+        if cfg.num_query_heads % cfg.kv_heads:
+            return (
+                False,
+                f"num_query_heads {cfg.num_query_heads} must be a multiple of "
+                f"num_kv_heads {cfg.kv_heads}",
+            )
+        if cfg.gqa_fuse > ratio or ratio % cfg.gqa_fuse:
+            return (
+                False,
+                f"gqa_fuse {cfg.gqa_fuse} must divide the GQA ratio {ratio}",
+            )
+        if cfg.num_persistent:
+            # swapqk_num_work_items and the qb_major/batch_major unpack both
+            # assume one head per CTA; fusing would silently compute wrong heads.
+            return False, "gqa_fuse is incompatible with num_persistent"
+        if cfg.q_lds:
+            # Q_lds is indexed by wave_id, which no longer maps 1:1 to a query
+            # block once waves are split across heads.
+            return False, "gqa_fuse is incompatible with q_lds"
     return True, ""
 
 
@@ -821,7 +904,8 @@ def swapqk_grid(cfg: SwapQKCfg, *, seqlen_q: int, batch: int):
     q_per = cfg.q_rows_per_cta
     if seqlen_q % q_per != 0:
         raise ValueError(f"seqlen_q {seqlen_q} must be a multiple of {q_per}")
-    return (seqlen_q // q_per, cfg.num_query_heads, batch)
+    # gqa_fuse: y indexes head GROUPS of gqa_fuse query heads, not single heads.
+    return (seqlen_q // q_per, cfg.num_query_heads // cfg.gqa_fuse, batch)
 
 
 def swapqk_num_work_items(cfg: SwapQKCfg, *, seqlen_q: int, batch: int) -> int:
@@ -835,6 +919,18 @@ def swapqk_num_work_items(cfg: SwapQKCfg, *, seqlen_q: int, batch: int) -> int:
 def swapqk_persistent_grid(cfg: SwapQKCfg):
     """Fixed 1-D launch grid for num_persistent>0 (independent of problem size)."""
     return (cfg.num_persistent, 1, 1)
+
+
+def swapqk_causal_kv_stop(cfg: SwapQKCfg, q_group: int) -> int:
+    """kv blocks a causal CTA must visit -- scalar mirror of the in-kernel trim.
+
+    The CTA owns query rows [q_group*Q, q_group*Q + Q-1] for Q=q_rows_per_cta, so
+    the last kv block it can see is the one holding the diagonal of its LAST row.
+    Over-inclusion is harmless (the inline mask zeroes it); under-inclusion drops
+    real attention weight, so the +1 is on the ceiling of the row span, not the
+    wave span. Exported so the arithmetic is testable without a device.
+    """
+    return (q_group * cfg.q_rows_per_cta + cfg.q_rows_per_cta - 1) // cfg.block_n + 1
 
 
 def _declare_params(b: IRBuilder, *, persistent: bool = False):
@@ -927,6 +1023,17 @@ def build_wmma_fmha_swapqk(
     c_wave = b.const_i32(wave)
     tid = b.thread_id_x()
     wave_id = b.div(tid, c_wave)
+    GF = cfg.gqa_fuse
+    if GF > 1:
+        # workitem.id.x is a divergence source in AMDGPUTTI::isSourceOfDivergence,
+        # so LLVM cannot prove tid/32 is wave-uniform. Force both halves into
+        # SGPRs or the head/row addressing goes vector.
+        c_gf = b.const_i32(GF)
+        head_slot = b.to_sgpr_u32(b.mod(wave_id, c_gf))
+        q_wave = b.to_sgpr_u32(b.div(wave_id, c_gf))
+    else:
+        head_slot = None
+        q_wave = wave_id
     lane = b.mod(tid, c_wave)
     col = b.mod(lane, c16)  # lane % 16  == query row within the 16-tile
     lane_lt16 = b.cmp_lt(lane, c16)
@@ -999,14 +1106,27 @@ def build_wmma_fmha_swapqk(
 
     else:
         q_group = b.block_id_x()
-        head = b.block_id_y()
+        if GF > 1:
+            # y indexes head groups; this wave serves group*GF + head_slot.
+            head = b.add(b.mul(b.block_id_y(), b.const_i32(GF)), head_slot)
+        else:
+            head = b.block_id_y()
         batch = b.block_id_z()
 
         def _pers_close():
             return None
 
     qh, kvh = cfg.num_query_heads, cfg.kv_heads
-    kv_head = head if kvh == qh else b.div(head, b.const_i32(qh // kvh))
+    if GF > 1:
+        # head = y*GF + slot with slot < GF <= ratio and ratio % GF == 0, so
+        # head // ratio == y // (ratio // GF): block-uniform, no head_slot.
+        kv_head = (
+            b.block_id_y()
+            if (qh // kvh) == GF
+            else b.div(b.block_id_y(), b.const_i32((qh // kvh) // GF))
+        )
+    else:
+        kv_head = head if kvh == qh else b.div(head, b.const_i32(qh // kvh))
 
     seqlen_q = p["seqlen_q"]
     seqlen_k = p["seqlen_k"]
@@ -1088,7 +1208,8 @@ def build_wmma_fmha_swapqk(
     q_rows_per_cta = b.const_i32(cfg.q_rows_per_cta)
     cta_row0 = b.mul(q_group, q_rows_per_cta)
     # this wave owns MQ contiguous 16-row query tiles.
-    wave_base = b.add(cta_row0, b.mul(wave_id, b.const_i32(16 * MQ)))
+    # q_wave == wave_id unless gqa_fuse split the waves across heads.
+    wave_base = b.add(cta_row0, b.mul(q_wave, b.const_i32(16 * MQ)))
     batch_tok_q = b.mul(batch, seqlen_q)
     batch_tok_k = b.mul(batch, seqlen_k)
     # per query-group (g) row bases; MQ==1 reduces to the original single group.
@@ -1147,10 +1268,19 @@ def build_wmma_fmha_swapqk(
     c_block_n = b.const_i32(block_n)
     loop_stop = b.div(seqlen_k, c_block_n)
     if cfg.mask_mode == "causal":
-        # CTA owns q rows up to cta_row0 + 16*W - 1; a kv block kt is needed iff
-        # kt*block_n <= max q pos. Round up + 1 (over-inclusion is masked, safe).
+        # CTA owns q rows up to cta_row0 + q_rows_per_cta - 1; a kv block kt is
+        # needed iff kt*block_n <= that. Round up + 1 (over-inclusion is masked).
+        # The q_block (MQ) factor was missing here: at MQ>1 each wave owns MQ
+        # 16-row tiles, so the row span is 16*W*MQ, not 16*W. It was safe at the
+        # shipped W2/MQ1/bn64 only by alignment; at W2/MQ2/bn16 the old form
+        # returned 4g+3 where 4g+4 is required and silently dropped a kv block.
+        # swapqk_causal_kv_stop() is the scalar mirror of this; keep them equal.
         causal_stop = b.add(
-            b.div(b.add(cta_row0, b.const_i32(16 * W)), c_block_n), b.const_i32(1)
+            b.div(
+                b.add(cta_row0, b.const_i32(cfg.q_rows_per_cta - 1)),
+                c_block_n,
+            ),
+            b.const_i32(1),
         )
         loop_stop = b.select(b.cmp_lt(causal_stop, loop_stop), causal_stop, loop_stop)
 

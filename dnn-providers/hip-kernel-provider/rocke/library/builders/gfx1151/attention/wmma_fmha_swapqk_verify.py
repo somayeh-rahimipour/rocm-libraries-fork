@@ -70,6 +70,23 @@ def main() -> int:
         action="store_true",
         help="stream the O store past the MALL (large-L lever, +3-14%%)",
     )
+    p.add_argument(
+        "--qk-douter",
+        type=int,
+        default=0,
+        choices=(0, 1),
+        help="d-outer QK loop; measured a loss at both corners, default off",
+    )
+    p.add_argument(
+        "--sched-mode", default="pingpong", choices=("pingpong", "none")
+    )
+    p.add_argument("--lazy-rescale", type=int, default=1, choices=(0, 1))
+    p.add_argument(
+        "--gqa-fuse",
+        type=int,
+        default=1,
+        help="query heads sharing a kv head fused into one CTA (wave-per-head)",
+    )
     p.add_argument("--tol", type=float, default=2e-2)
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--warmup", type=int, default=15)
@@ -91,6 +108,10 @@ def main() -> int:
         qk_ilp=args.qk_ilp,
         v_transposed=not args.row_major_v,
         o_nt=args.o_nt,
+        qk_douter=bool(args.qk_douter),
+        sched_mode=args.sched_mode,
+        lazy_rescale=bool(args.lazy_rescale),
+        gqa_fuse=args.gqa_fuse,
     )
     ok, why = is_valid_spec(cfg, args.arch)
     if not ok:

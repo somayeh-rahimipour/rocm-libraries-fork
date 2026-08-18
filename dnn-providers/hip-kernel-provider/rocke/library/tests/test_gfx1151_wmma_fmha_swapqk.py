@@ -27,6 +27,7 @@ from kernels.gfx1151.wmma_fmha_swapqk import (
     SwapQKCfg,
     build_wmma_fmha_swapqk,
     is_valid_spec,
+    swapqk_causal_kv_stop,
     swapqk_grid,
     swapqk_num_work_items,
     swapqk_transpose_v,
@@ -64,7 +65,13 @@ class TestSwapQKDefaults(unittest.TestCase):
         self.assertTrue(cfg.lazy_rescale)
         self.assertTrue(cfg.fast_exp2)
         self.assertTrue(cfg.v_transposed)
-        self.assertTrue(cfg.qk_douter)
+        # qk_douter's documented +3.3% did not reproduce and its sign was wrong:
+        # -4.7% at H24 MHA dense and -35.7% at Hq32/Hk8 GQA causal, both
+        # confirmed in SQ_BUSY_CYCLES at an identical SQ_WAVES.
+        self.assertFalse(cfg.qk_douter)
+        # gqa_fuse is opt-in. It is a large win where it applies but it widens
+        # the CTA, so callers choose it rather than inheriting it silently.
+        self.assertEqual(cfg.gqa_fuse, 1)
 
     def test_experimental_levers_default_off(self):
         # Everything with a recorded regression stays off, so the default build
@@ -101,8 +108,25 @@ class TestSwapQKDefaults(unittest.TestCase):
         name = _prod_cfg().kernel_name()
         for token in ("H128", "HQ24", "w2", "pingpong", "ilp2", "bn64"):
             self.assertIn(token, name)
-        for token in ("vt", "dual", "buf", "lazy", "fexp", "qkdo"):
+        for token in ("vt", "dual", "buf", "lazy", "fexp", "qkno"):
             self.assertIn(f"_{token}", name)
+        # F==1 names stay byte-identical to the pre-fusion kernel.
+        self.assertNotIn("gf", name)
+
+    def test_fused_and_unfused_names_cannot_collide(self):
+        # The artifact cache is keyed on this string. If a fused build shared a
+        # key with the unfused one the cache would serve the wrong binary and
+        # every measurement after that point would be a lie -- and it would
+        # still PASS numerically, because both kernels compute correct
+        # attention. Nothing else in the suite catches that.
+        base = _prod_cfg(num_kv_heads=6).kernel_name()
+        names = {base}
+        for f in (2, 4):
+            n = _prod_cfg(num_kv_heads=6, gqa_fuse=f).kernel_name()
+            self.assertIn(f"gf{f}", n)
+            self.assertNotIn(n, names)
+            names.add(n)
+        self.assertEqual(len(names), 3)
 
 
 class TestSwapQKValidity(unittest.TestCase):
@@ -137,6 +161,36 @@ class TestSwapQKValidity(unittest.TestCase):
         ok, why = is_valid_spec(_prod_cfg(mask_mode="sliding"))
         self.assertFalse(ok)
         self.assertIn("mask_mode", why)
+
+    def test_accepts_gqa_fuse_that_divides_the_ratio(self):
+        # HQ24 / HK6 -> ratio 4, so F in {1,2,4}.
+        for f in (1, 2, 4):
+            ok, why = is_valid_spec(_prod_cfg(num_kv_heads=6, gqa_fuse=f))
+            self.assertTrue(ok, f"gqa_fuse={f}: {why}")
+
+    def test_rejects_gqa_fuse_that_does_not_divide_the_ratio(self):
+        # A stale F would split a CTA's waves across two KV heads while the
+        # kv_head decode still reads block_id_y -- silently wrong attention.
+        for f in (3, 8):
+            ok, why = is_valid_spec(_prod_cfg(num_kv_heads=6, gqa_fuse=f))
+            self.assertFalse(ok, f"gqa_fuse={f} must be rejected")
+            self.assertIn("gqa_fuse", why)
+
+    def test_rejects_gqa_fuse_without_kv_heads(self):
+        # Under MHA there is nothing to fuse; the ratio is 1.
+        ok, why = is_valid_spec(_prod_cfg(gqa_fuse=2))
+        self.assertFalse(ok)
+        self.assertIn("num_kv_heads", why)
+
+    def test_rejects_gqa_fuse_with_persistent_or_q_lds(self):
+        # Both decode work-items or LDS slabs from wave_id / a one-head-per-CTA
+        # work count, neither of which survives fusion.
+        ok, why = is_valid_spec(_prod_cfg(num_kv_heads=6, gqa_fuse=4, num_persistent=960))
+        self.assertFalse(ok)
+        self.assertIn("num_persistent", why)
+        ok, why = is_valid_spec(_prod_cfg(num_kv_heads=6, gqa_fuse=4, q_lds=True))
+        self.assertFalse(ok)
+        self.assertIn("q_lds", why)
 
     def test_builder_raises_on_an_invalid_config(self):
         with self.assertRaises(ValueError):
@@ -202,6 +256,18 @@ class TestSwapQKLowering(unittest.TestCase):
         )
         self.assertIn("atomicrmw", ll)
 
+    def test_gqa_fuse_lowers_and_keeps_the_head_decode_scalar(self):
+        # workitem.id.x is a divergence source, so LLVM cannot prove tid/32 is
+        # wave-uniform; without the forced readfirstlane the head and query-row
+        # addressing both go vector and the win evaporates. Assert the pin
+        # survived into the IR rather than trusting the builder call.
+        base = _prod_cfg(num_kv_heads=6, mask_mode="causal")
+        ll = self._lower(_prod_cfg(num_kv_heads=6, gqa_fuse=4, mask_mode="causal"))
+        self.assertIn("llvm.amdgcn.wmma.f32.16x16x16.f16", ll)
+        self.assertGreater(
+            ll.count("readfirstlane"), self._lower(base).count("readfirstlane")
+        )
+
     def test_distinct_configs_build_distinct_kernels(self):
         a = build_wmma_fmha_swapqk(_prod_cfg(), arch="gfx1151")
         b = build_wmma_fmha_swapqk(_prod_cfg(block_n=32), arch="gfx1151")
@@ -232,6 +298,140 @@ class TestSwapQKLaunchGeometry(unittest.TestCase):
     def test_kv_heads_defaults_to_mha(self):
         self.assertEqual(_prod_cfg().kv_heads, _HQ)
         self.assertEqual(_prod_cfg(num_kv_heads=4).kv_heads, 4)
+
+    def test_gqa_fuse_widens_the_cta_without_widening_the_query_rows(self):
+        # This is the whole design: the extra waves serve extra HEADS, so each
+        # wave still owns exactly one head's 128-VGPR O accumulator and the
+        # register budget is untouched. If q_rows_per_cta ever tracked gqa_fuse
+        # the kernel would spill and the win would invert.
+        base = _prod_cfg(num_kv_heads=6)
+        for f in (1, 2, 4):
+            cfg = _prod_cfg(num_kv_heads=6, gqa_fuse=f)
+            self.assertEqual(cfg.block_size, base.block_size * f)
+            self.assertEqual(cfg.q_rows_per_cta, base.q_rows_per_cta)
+
+    def test_gqa_fuse_folds_heads_into_the_y_axis(self):
+        # Total waves launched must be invariant -- that equality is the control
+        # for every fusion A/B: an unmatched SQ_WAVES means the two arms did
+        # different amounts of work and the comparison means nothing.
+        base = _prod_cfg(num_kv_heads=6)
+        qb, h, bz = swapqk_grid(base, seqlen_q=2048, batch=2)
+        for f in (2, 4):
+            cfg = _prod_cfg(num_kv_heads=6, gqa_fuse=f)
+            g = swapqk_grid(cfg, seqlen_q=2048, batch=2)
+            self.assertEqual(g, (qb, h // f, bz))
+            self.assertEqual(
+                g[0] * g[1] * g[2] * cfg.block_size,
+                qb * h * bz * base.block_size,
+            )
+
+
+class TestSwapQKCausalTrim(unittest.TestCase):
+    """The kv-block trim is the one place a wrong answer is silent.
+
+    Over-inclusion costs a block of wasted work; the inline mask still zeroes
+    it. Under-inclusion drops real attention weight from the LAST query rows of
+    a CTA, which no shape check and no compile catches -- only a numeric
+    comparison would, and only at the exact (n_waves, q_block, block_n) triple
+    that trips it.
+    """
+
+    def _cover(self, cfg, q_group: int) -> bool:
+        """Does the trim reach the diagonal of this CTA's last query row?"""
+        last_row = q_group * cfg.q_rows_per_cta + cfg.q_rows_per_cta - 1
+        return swapqk_causal_kv_stop(cfg, q_group) > last_row // cfg.block_n
+
+    def test_trim_covers_every_query_row_across_the_knob_grid(self):
+        for n_waves in (1, 2):
+            for q_block in (1, 2):
+                for block_n in (16, 32, 48, 64):
+                    cfg = _prod_cfg(
+                        mask_mode="causal",
+                        n_waves=n_waves,
+                        q_block=q_block,
+                        block_n=block_n,
+                    )
+                    for g in range(8):
+                        self.assertTrue(
+                            self._cover(cfg, g),
+                            f"w{n_waves} qb{q_block} bn{block_n} g{g} drops a kv block",
+                        )
+
+    def test_trim_regression_at_the_config_the_old_form_broke(self):
+        # The pre-fix form used the wave span 16*n_waves and omitted the q_block
+        # factor. At w2/qb2/bn16 that returns 4g+3 where 4g+4 is required.
+        cfg = _prod_cfg(mask_mode="causal", n_waves=2, q_block=2, block_n=16)
+        self.assertEqual(cfg.q_rows_per_cta, 64)
+        for g in range(4):
+            self.assertEqual(swapqk_causal_kv_stop(cfg, g), 4 * g + 4)
+
+    def test_trim_is_tight_not_merely_safe(self):
+        # A correct-but-loose trim would pass the coverage test above while
+        # quietly paying for kv blocks that are entirely above the diagonal.
+        for block_n in (16, 32, 64):
+            cfg = _prod_cfg(mask_mode="causal", block_n=block_n)
+            for g in range(6):
+                last_row = g * cfg.q_rows_per_cta + cfg.q_rows_per_cta - 1
+                self.assertEqual(
+                    swapqk_causal_kv_stop(cfg, g), last_row // block_n + 1
+                )
+
+
+class TestSwapQKAdaptiveBlockN(unittest.TestCase):
+    """The torch op picks block_n from the key length.
+
+    The divisibility half of this is a CORRECTNESS gate, not a perf knob: the kv
+    loop bound is ``seqlen_k // block_n``, so a non-divisible launch drops the
+    tail silently. The threshold half encodes the measured L2 crossover.
+    """
+
+    @staticmethod
+    def _pick():
+        from rocke.instances.gfx1151.wmma_fmha_swapqk import _pick_block_n
+
+        return _pick_block_n
+
+    def test_table_thresholds(self):
+        pick = self._pick()
+        self.assertEqual(pick(2048), 64)
+        self.assertEqual(pick(3072), 64)
+        self.assertEqual(pick(4096), 128)
+        self.assertEqual(pick(8192), 128)
+
+    def test_demotes_when_the_wider_tile_does_not_divide(self):
+        # Past the threshold but not 128-aligned: must fall back rather than
+        # truncate 64 keys.
+        pick = self._pick()
+        self.assertEqual(pick(4160), 64)
+
+    def test_rejects_lengths_no_tile_divides(self):
+        # 2080 is 32-aligned, which the old vLLM gate accepted while running
+        # bn64 -- that silently dropped the last 32 keys.
+        pick = self._pick()
+        self.assertEqual(pick(2080), 0)
+        self.assertEqual(pick(48), 0)
+
+    def test_env_pin_still_honours_divisibility(self):
+        import rocke.instances.gfx1151.wmma_fmha_swapqk as inst
+
+        prev = inst._BLOCK_N
+        try:
+            inst._BLOCK_N = "128"
+            self.assertEqual(inst._pick_block_n(8192), 128)
+            # A pin overrides the length thresholds but NOT divisibility: 576 is
+            # 64-aligned, which "auto" would happily serve, and the pin must not.
+            self.assertEqual(inst._pick_block_n(2048), 128)
+            self.assertEqual(inst._pick_block_n(576), 0)
+        finally:
+            inst._BLOCK_N = prev
+
+    def test_the_two_tiles_cannot_share_a_cache_key(self):
+        # An artifact cache collision here would serve bn64 code for a bn128
+        # config, making every measurement downstream a lie.
+        self.assertNotEqual(
+            _prod_cfg(block_n=64).kernel_name(),
+            _prod_cfg(block_n=128).kernel_name(),
+        )
 
 
 class TestSwapQKVRelay(unittest.TestCase):
