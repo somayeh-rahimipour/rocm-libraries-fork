@@ -965,6 +965,40 @@ for a TheRock-index build if provenance tagging is wanted there.
   before or after hipBLASLt/PyTorch MUST resolve to a single `liborigami.so.1`
   mapping (checkable via `/proc/self/maps` or `ctypes` handle identity in a test).
 
+## Result observed (2026-08-18): build-against-installed validated
+
+Ran the Step 8 path end-to-end in `rocm/dev-ubuntu-22.04` (harness:
+`.handoff/origami-py-phase2/build_against_installed_experiment.sh`, log
+alongside): install `liborigami` shared with its CMake exports into a prefix,
+then build the wheel with `ORIGAMI_BUILD_FROM_SOURCE=OFF` and
+`CMAKE_PREFIX_PATH` pointing at that prefix.
+
+- **Wheel:** `rocm_origami-0.1.0-cp310-cp310-linux_x86_64.whl` (name and version
+  as decided; the extension links `/opt/origami-install/lib/liborigami.so.1.0`).
+- **Linker gate PASS:** `readelf -d` on the extension shows
+  `NEEDED liborigami.so.1` -- the static embed is gone. Installed lib SONAME is
+  `liborigami.so.1`, confirming the loader gate keys on the SOVERSION `1`, not the
+  wheel version.
+- **`liborigami` is off the default loader path (confirmed):** with no
+  `rocm_sdk` and nothing on `LD_LIBRARY_PATH`, `import origami` fails with
+  `liborigami.so.1: cannot open shared object file`. The extension's `$ORIGIN`
+  RPATH resolves to the venv, not the SDK library wheel, so the preload is
+  required -- it is not optional on Linux. (This corrects the assumption, copied
+  from a hipDNN wheel-package draft, that the binding library "resolves on its
+  own" on Linux; `__init__.py` now names `origami` in the preload list on both
+  platforms.)
+- **Extension is sound once deps resolve:** with the `liborigami` and HIP runtime
+  directories on `LD_LIBRARY_PATH` (standing in for the `rocm_sdk` RTLD_GLOBAL
+  preload), `import origami` succeeds and reports version `0.1.0`.
+
+Not exercised here: the literal `rocm_sdk.initialize_process(preload_shortnames=
+[..., "origami"])` call in a real ROCm-wheel environment (no `rocm_sdk` in this
+base image) and the single-copy `/proc/self/maps` assertion. The two import
+results bracket it -- deps must be made resolvable (4a) and the extension imports
+cleanly once they are (4b) -- and the preload API is the production mechanism that
+makes them resolvable; end-to-end confirmation belongs to the TheRock wheel-lane
+wiring.
+
 ## Artifact accounting (wheel contents)
 
 The wheel ships exactly: the per-version extension
