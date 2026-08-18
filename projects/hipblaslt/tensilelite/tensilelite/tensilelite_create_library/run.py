@@ -84,7 +84,7 @@ from tensilelite.Toolchain.Component import Assembler
 from tensilelite.Utilities.Decorators.Profile import profile
 from tensilelite.Utilities.Decorators.Timing import timing
 from ..resources import copy_static_headers
-from .ParseArguments import parseArguments
+from .parse_arguments import parseArguments
 
 
 def libraryRoot(outputPath: Union[str, Path]) -> Path:
