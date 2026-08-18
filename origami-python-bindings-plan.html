@@ -302,8 +302,8 @@ re-verified. All three were refuted. Recording them here so they are not re-atte
 
 <h2><span class="num">4</span>The decisions that close Phase 2</h2>
 <p>
-Phase 2's job was to produce decisions, not code. Every row below is resolved except the final
-version number (owner-ratified) and the Windows loader (deferred out of this pass).
+Phase 2's job was to produce decisions, not code. Every row below is resolved &mdash; the wheel
+version is ratified at <code>0.1.0</code> &mdash; except the Windows loader (deferred out of this pass).
 </p>
 <table class="scroll-wrap">
   <thead><tr><th>Decision</th><th>Choice</th><th>Status</th></tr></thead>
@@ -313,8 +313,8 @@ version number (owner-ratified) and the Windows loader (deferred out of this pas
     <tr><td>Python ABI strategy</td><td>One wheel per CPython version, 3.10&ndash;3.13 (plain <code>nanobind_add_module</code>)</td><td><span class="tag ok">Resolved</span></td></tr>
     <tr><td>Linux loader</td><td>Extension has <code>NEEDED liborigami.so.1</code>; SDK copy resolved via <code>rocm_sdk</code> preload + <code>_dist_info.py</code> entry</td><td><span class="tag ok">Resolved</span></td></tr>
     <tr><td>Package name</td><td><code>rocm-origami</code> (revert in-tree <code>name = "origami"</code>)</td><td><span class="tag ok">Resolved</span></td></tr>
-    <tr><td>Version number</td><td>Single-sourced base (recommend <code>0.1.0</code>), rocSHMEM-style local segment optional; final number owner-ratified</td><td><span class="tag warn">Number gated</span></td></tr>
-    <tr><td>PyPI migration</td><td>Publish reconciled version &rarr; verify in consumer CI &rarr; yank predecessors</td><td><span class="tag ok">Resolved</span></td></tr>
+    <tr><td>Version number</td><td><code>0.1.0</code>, single-sourced from <code>__init__.py</code> and decoupled from the C++ SOVERSION (<code>1</code>). A minor over the broken third-party <code>0.0.2</code>. <b>Public PyPI cannot take a PEP 440 local segment</b>, so the public release is plain <code>0.1.0</code>; reserve any <code>+origami&hellip;</code> tag for a TheRock-index build.</td><td><span class="tag ok">Resolved: 0.1.0</span></td></tr>
+    <tr><td>PyPI migration</td><td>Publish <code>rocm-origami 0.1.0</code> &rarr; verify in consumer CI &rarr; yank predecessors</td><td><span class="tag ok">Resolved</span></td></tr>
     <tr><td>Windows loader</td><td>By analogy (<code>os.add_dll_directory</code>); not built in this pass</td><td><span class="tag warn">Deferred</span></td></tr>
   </tbody>
 </table>
@@ -330,7 +330,7 @@ Two repositories change; the rest are distribution actions or consumers that are
     <tr><td><b>rocm-libraries</b><br><code>shared/origami/python/</code></td><td>The wheel source: flip <code>ORIGAMI_BUILD_FROM_SOURCE</code> off, rename to <code>rocm-origami</code>, preload in <code>__init__.py</code> (see section 7)</td><td><span class="tag ok">Planned</span></td></tr>
     <tr><td><b>TheRock</b><br>workflow</td><td>Add a "Build rocm-origami wheel" step to <code>build_portable_linux_python_packages.yml</code>, mirroring the rocSHMEM step in #5638</td><td><span class="tag bad">Required</span></td></tr>
     <tr><td><b>TheRock</b><br><code>_dist_info.py</code></td><td>Add the <code>origami</code> <code>LibraryEntry</code> so preload resolves the SDK's <code>liborigami</code>. Component build stays <code>ENABLE_PYTHON=OFF</code></td><td><span class="tag bad">Required</span></td></tr>
-    <tr><td>PyPI <code>rocm-origami</code></td><td>Publish the reconciled version, then yank predecessors. Not a repo change</td><td><span class="tag ok">Action</span></td></tr>
+    <tr><td>PyPI <code>rocm-origami</code></td><td>Publish <code>0.1.0</code>, then yank predecessors. Not a repo change</td><td><span class="tag ok">Action</span></td></tr>
     <tr><td>PyTorch CI</td><td>Install/import the new wheel across the Python matrix before the yank. Verification only</td><td><span class="tag ok">Action</span></td></tr>
     <tr><td>hipBLASLt</td><td><b>Not impacted.</b> Consumes Origami as a C++ dependency with Python off (<code>find_package(origami)</code> / <code>roc::origami-headers</code>); never builds or imports the wheel</td><td><span class="tag ok">Unaffected</span></td></tr>
   </tbody>
@@ -426,7 +426,7 @@ native library &mdash; the wheel is built by a separate workflow step.
   <tbody>
     <tr><td><code>python/CMakeLists.txt</code></td><td>Change the <code>ORIGAMI_BUILD_FROM_SOURCE</code> default to <code>OFF</code> so the wheel build runs the existing <code>find_package(origami)</code> &rarr; <code>roc::origami</code> branch instead of static-embedding. (The branch already exists.)</td></tr>
     <tr><td><code>python/pyproject.toml</code></td><td>Rename <code>name = "origami"</code> &rarr; <code>name = "rocm-origami"</code> (the name <code>origami</code> is an unrelated active PyPI project). Set <code>ORIGAMI_BUILD_FROM_SOURCE=OFF</code> in <code>cmake.define</code> so the wheel path builds against the installed package regardless of the CMake default.</td></tr>
-    <tr><td><code>python/pyproject.toml</code></td><td>Reconcile the reported version to one number (recommend <code>0.1.0</code>); optionally record the linked <code>liborigami</code> version as a PEP 440 local segment, rocSHMEM-style.</td></tr>
+    <tr><td><code>python/pyproject.toml</code></td><td>Version is <code>0.1.0</code> (already single-sourced from <code>__init__.py</code>); no change needed. Do <em>not</em> add a PEP 440 local segment to the public-PyPI wheel &mdash; public PyPI rejects it.</td></tr>
     <tr><td><code>python/CMakeLists.txt</code></td><td>Keep the merged <code>$ORIGIN</code>-relative <code>INSTALL_RPATH</code> (fallback resolution for the preload path). Do not switch to <code>INSTALL_RPATH_USE_LINK_PATH</code> (it bakes absolute host paths). Optionally add a min-version gate: <code>find_package(origami &lt;minver&gt; CONFIG REQUIRED)</code>.</td></tr>
     <tr><td><code>python/src/origami/__init__.py</code></td><td>Before <code>from .origami import ...</code>, call <code>rocm_sdk.preload_libraries("origami")</code>. Remove any bundled-fallback logic &mdash; there is no bundled copy. Keep the existing actionable <code>ImportError</code> message.</td></tr>
   </tbody>
@@ -460,14 +460,14 @@ native library &mdash; the wheel is built by a separate workflow step.
   <li>A single-copy regression test loads the SDK <code>liborigami</code> alongside the extension,
   round-trips a <code>problem_t</code> through <code>select_config</code>, and asserts exactly one
   <code>liborigami.so.1</code> mapping in the process with no crash.</li>
-  <li>The reconciled <code>rocm-origami</code> release installs and imports across the consumer
+  <li><code>rocm-origami 0.1.0</code> installs and imports across the consumer
   (PyTorch) CI matrix.</li>
 </ul>
 
 <h2><span class="num">9</span>Rollout and rollback</h2>
 <ol class="steps">
   <li><b>Land the source changes</b> in <code>rocm-libraries</code>, plus the TheRock workflow step and <code>_dist_info.py</code> entry; the Python-packages lane builds and import-tests all four wheels and runs the linker gate plus single-copy regression.</li>
-  <li><b>Publish <code>rocm-origami</code></b> (reconciled version) to PyPI.</li>
+  <li><b>Publish <code>rocm-origami 0.1.0</code></b> (plain public version, no local segment) to PyPI.</li>
   <li><b>Verify install and import</b> across the consumer (PyTorch) CI Python matrix before touching the old releases.</li>
   <li><b>Yank predecessors</b> (<code>0.0.2</code>, <code>0.0.1</code>, <code>0.0.1.dev0</code>) to close the window where the static-embed sdist can still be installed.</li>
   <li><b>Rollback path:</b> if the release regresses, do not yank the predecessors; the fix is self-contained to the wheel, so reverting the four wheels restores prior behavior.</li>
@@ -476,8 +476,8 @@ native library &mdash; the wheel is built by a separate workflow step.
   <p class="lbl">Sequencing note and open items</p>
   <p>The two TheRock changes (section 7) &mdash; the workflow step and the <code>_dist_info.py</code>
   entry &mdash; must land <em>with or before</em> the wheel: the step is what builds it, and the entry is
-  what makes the SDK copy resolve. Both are required changes, not loose ends. Still open: reconcile the
-  final version number (owner call), identify the PyPI credential holder internally, and the Windows
+  what makes the SDK copy resolve. Both are required changes, not loose ends. The wheel version is
+  ratified at <code>0.1.0</code>. Still open: identify the PyPI credential holder internally, and the Windows
   loader is deferred to a later pass.</p>
 </div>
 

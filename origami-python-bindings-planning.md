@@ -836,11 +836,11 @@ static-embedding it.
 | Wheel contents | Extension + Python sources + metadata only; **no bundled `liborigami`** | **RESOLVED** | The extension links the SDK copy dynamically; nothing to bundle. |
 | Linux loader | Extension shows `NEEDED liborigami.so.1`; SDK copy resolved via `rocm_sdk` preload + `_dist_info.py` registration; keep `$ORIGIN` `INSTALL_RPATH` | **RESOLVED** | Regression gate unchanged: `readelf -d` must show `NEEDED liborigami.so.1`. |
 | Python ABI | **Per-CPython-version build, 3.10-3.13**, plain `nanobind_add_module` | **RESOLVED** | Unchanged from Session 2; orthogonal to delivery. `abi3` revisited only after nanobind 3.0 GA. |
-| Version scheme | Base release single-sourced; optionally a PEP 440 local segment recording the linked `liborigami` version (rocSHMEM-style) | **RESOLVED (design); number gated** | Reconcile `0.1.0` (`__init__.py`) vs `0.0.3` (yank-sequence assumption) to one number -- owner to ratify. |
+| Version scheme | Wheel `0.1.0`, single-sourced from `__init__.py`; kept decoupled from the C++ `liborigami` SOVERSION (`1`, from `project(Origami VERSION 1.0.0)`) | **RESOLVED: `0.1.0` (owner-ratified)** | Minor bump over the broken third-party `0.0.2` -- an honest signal that this is a different, first-party, dynamically-linked package, not a patch. **Caveat:** a rocSHMEM-style PEP 440 local segment (`0.1.0+origami...`) is *rejected by public PyPI*; use plain `0.1.0` for the public-PyPI release, reserving any local segment for a TheRock-index build only. |
 | Package name | `rocm-origami` (revert in-tree `name = "origami"`) | **RESOLVED** | `origami` is an active unrelated PyPI project. |
 | `_dist_info.py` entry | Add an Origami `LibraryEntry` in TheRock so `rocm_sdk` preload resolves the SDK copy | **RESOLVED (design)** | Still required even under build-against-installed: preload needs the registration to find the SDK library at import time. |
 | Windows loader | `os.add_dll_directory` / `ctypes` preload by analogy | **DEFERRED** | Linux-first; no Windows build inspected. |
-| PyPI migration | Publish `rocm-origami` (reconciled version) -> verify in consumer CI -> yank `0.0.2`/`0.0.1`/`0.0.1.dev0` | **RESOLVED (sequence)** | Credential holder still to be identified internally. |
+| PyPI migration | Publish `rocm-origami 0.1.0` -> verify in consumer CI -> yank `0.0.2`/`0.0.1`/`0.0.1.dev0` | **RESOLVED (sequence)** | Credential holder still to be identified internally. |
 
 ## Selected architecture and why
 
@@ -929,14 +929,24 @@ is built by the new wheel step, not by the component build.
 
 ### Version reconciliation
 
-The built wheel reports `0.1.0` (dynamic, from `src/origami/__init__.py`), while
-the migration sequence assumed `rocm-origami 0.0.3`. These must collapse to one
-number. Recommendation: publish `0.1.0` -- it already single-sources from
-`__init__.py`, and a clean minor over the `0.0.x` workaround line reads correctly
--- and, rocSHMEM-style, append the linked-library version as a local segment
-(e.g. `0.1.0+origami<ver>`) so a copied wheel is self-documenting about the
-`liborigami` it was built against. Final number is an owner call; nothing else in
-the plan depends on it.
+**Ratified: `0.1.0`** (owner call, 2026-08-18). The built wheel already reports
+`0.1.0` dynamically from `src/origami/__init__.py`; the earlier migration draft
+had assumed `0.0.3`, which is dropped. `0.1.0` is a clean minor over the broken
+`0.0.x` third-party workaround line -- an honest signal that this is a different,
+first-party, dynamically-linked package rather than a patch to it -- and it
+satisfies the only hard constraint, that the successor sort above `0.0.2`.
+
+The wheel version stays **decoupled from the C++ `liborigami` SOVERSION** (`1`,
+from `project(Origami VERSION 1.0.0)` / `rocm_set_soversion`): the binding's API
+maturity is not the library's, and the loader gate depends on that `1`, not on
+the wheel number.
+
+**Local-segment caveat.** A rocSHMEM-style PEP 440 local segment
+(`0.1.0+origami<ver>`) is **rejected by public PyPI uploads** -- rocSHMEM gets
+away with it only because it publishes to TheRock's own index, not public PyPI.
+Since closing ROCM-29472 requires superseding the third-party package *on public
+PyPI*, the public release must be plain `0.1.0`; a local segment can be reserved
+for a TheRock-index build if provenance tagging is wanted there.
 
 ## ABI and build matrix
 
@@ -1154,11 +1164,11 @@ placed in any TheRock SDK component in the interim.
 
 1. Land the source changes above; CI builds and import-tests all four wheels and
    runs the linker gate + collision regression.
-2. Publish `rocm-origami 0.0.3`.
+2. Publish `rocm-origami 0.1.0` (plain public version -- no local segment).
 3. Verify install + import across the consumer (PyTorch) CI Python matrix.
 4. Only then yank `rocm-origami 0.0.2`, `0.0.1`, `0.0.1.dev0` to close the
    window where the static-embed sdist can still be installed.
-5. **Rollback:** if 0.0.3 regresses, do not yank the predecessors; the fix is
+5. **Rollback:** if 0.1.0 regresses, do not yank the predecessors; the fix is
    self-contained to the wheel, so reverting the four wheels restores 0.0.2
    behavior. The PyPI credential holder must be identified internally to execute
    publish/yank.
@@ -1169,6 +1179,6 @@ placed in any TheRock SDK component in the interim.
 - `import origami` succeeds on 3.10, 3.11, 3.12, 3.13.
 - The collision regression test passes with exactly one `liborigami.so.1`
   mapping in the process.
-- `rocm-origami 0.0.3` is installable and importable in the consumer CI matrix;
+- `rocm-origami 0.1.0` is installable and importable in the consumer CI matrix;
   predecessors are yanked.
 - No file from the wheel lands in a TheRock SDK component.
