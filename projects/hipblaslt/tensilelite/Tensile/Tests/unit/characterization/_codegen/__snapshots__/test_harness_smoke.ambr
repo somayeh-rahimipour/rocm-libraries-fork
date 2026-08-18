@@ -2,7 +2,7 @@
 # name: test_emit_golden_digest
   list([
     dict({
-      'basename': 'Cijk_Alik_Bjlk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT3ROtJ_EQyTkgmsLG1m0rqYck0HtxDJBZWvOVQz9fgJAU=',
+      'basename': 'Cijk_Alik_Bjlk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT3H1F_B5Ljo0yQV4O8uZAfGwWx5Q2wShoigudzPvL32YA=',
       'err': 0,
     }),
   ])
