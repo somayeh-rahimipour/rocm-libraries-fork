@@ -2416,13 +2416,14 @@ class KernelWriterAssembly(KernelWriter):
     peers early-exit in StreamK.streamKClusterPadEarlyExit, so the surviving
     peers' ld_bcst must wait only on the present lanes. The two-tile
     (StreamKForceDPOnly==0) Stream-K cluster is excluded: WorkGroup0 there is the
-    linear work index rather than an M-tile, so it derives Multicast=False and
-    emits no multicast masks to reduce (cluster reduction only, as on develop).
+    linear work index rather than an M-tile. Factored [Cs,Ck] B-masks are
+    rewritten later in StreamK.streamKFactoredMaskCompute.
     """
     cx = kernel["ClusterDim"][0]
     cy = kernel["ClusterDim"][1]
     if not ((cx > 1 or cy > 1)
-            and (kernel["StreamK"] == 0 or streamKMulticast(kernel))):
+            and (kernel["StreamK"] == 0
+                 or (streamKMulticast(kernel) and kernel["StreamKForceDPOnly"]))):
       return False
 
     module.addComment0("reduce multicast mask to real WGs in cluster")

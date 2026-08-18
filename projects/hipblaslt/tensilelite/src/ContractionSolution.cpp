@@ -971,7 +971,18 @@ namespace TensileLite
 
                     uint32_t sk3_skItersPerWG;
                     uint32_t sk3_skTiles;
-                    if(sk.reduction == origami::reduction_t::parallel)
+                    size_t   ckSplit = static_cast<size_t>(sizeMapping.clusterDim.y);
+                    if(sizeMapping.streamKForceDPOnly == 0 && ckSplit > 1
+                       && (sk3_itersPerTile % ckSplit) == 0)
+                    {
+                        // Cluster reduction: every tile is split Ck ways.
+                        // sk.grid is Ck*tiles (unrounded); extraIters is 0.
+                        sk3_skItersPerWG
+                            = static_cast<uint32_t>(sk3_itersPerTile)
+                              / static_cast<uint32_t>(ckSplit);
+                        sk3_skTiles = static_cast<uint32_t>(sk3_tiles);
+                    }
+                    else if(sk.reduction == origami::reduction_t::parallel)
                     {
                         uint32_t skSplit
                             = static_cast<uint32_t>(sk.grid / sk3_tiles);
@@ -1035,7 +1046,19 @@ namespace TensileLite
                 }
 
                 // Stream-K 3 uses the two-tile ABI.
-                if(sk.reduction == origami::reduction_t::parallel)
+                size_t ckSplit = static_cast<size_t>(sizeMapping.clusterDim.y);
+                if(sizeMapping.streamKForceDPOnly == 0 && ckSplit > 1
+                   && (itersPerTile % ckSplit) == 0)
+                {
+                    // Cluster reduction: every tile is split Ck ways.
+                    // sk.grid is Ck*tiles (unrounded); extraIters is 0.
+                    uint32_t skItersPerWG
+                        = static_cast<uint32_t>(itersPerTile) / static_cast<uint32_t>(ckSplit);
+                    args.template append<uint32_t>("SKItersPerWG", skItersPerWG);
+                    args.template append<uint32_t>("skGrid", sk.grid);
+                    args.template append<uint32_t>("skTiles", static_cast<uint32_t>(tiles));
+                }
+                else if(sk.reduction == origami::reduction_t::parallel)
                 {
                     uint32_t skSplit
                         = sk.grid / tiles; // skTiles is skSplit in parallel reduction path
@@ -1933,9 +1956,22 @@ namespace TensileLite
                 rv.numWorkGroups.x = problemNumGroupTiles.x; // nWG0 (M-tiles)
                 // rv.numWorkGroups.y already = nWG1 * gsu (N-tiles); z stays batch.
             }
+            else if(sizeMapping.streamK == 3 && sizeMapping.streamKForceDPOnly == 0
+                    && sizeMapping.clusterDim.y > 1)
+            {
+                // ForceDPOnly=0 cluster reduction [Cs, Ck] with Ck = clusterDim.y:
+                // launch a 2-D grid so the cluster Y-extent is legal (gridDimY % Ck
+                // == 0) and every WG gets a unique index via
+                // StreamKIdx = WorkGroup0*Ck + WorkGroup1. sk.grid is Ck*tiles, so
+                // gridDimX = tiles; RoundUpToMultiple below pads X to a Cs multiple.
+                uint32_t ck        = static_cast<uint32_t>(sizeMapping.clusterDim.y);
+                rv.numWorkGroups.x = sk.grid / ck;
+                rv.numWorkGroups.y = ck;
+                rv.numWorkGroups.z = 1;
+            }
             else
             {
-                // Linear Stream-K launch (no cluster, or ForceDPOnly=0).
+                // Linear Stream-K launch (no cluster, or ForceDPOnly=0 [Cs,1]).
                 rv.numWorkGroups.x = sk.grid;
                 rv.numWorkGroups.y = 1;
                 rv.numWorkGroups.z = 1;
@@ -1964,15 +2000,17 @@ namespace TensileLite
         // peers' broadcast masks are trimmed to the present lanes
         // (computeMulticastMaskReduction).
         //
-        // Only the ForceDPOnly cluster multicast needs this: it is the path whose
-        // grid spans the real M x N tile space and whose padded peers have a
-        // pad-exit. A ForceDPOnly==0 Stream-K cluster keeps develop's launch --
-        // its 1-D sk.grid is not a tile space and it has no pad-exit, so rounding
-        // up would only add work-groups that run the whole Stream-K prologue
-        // before falling out on an empty iteration range.
+        // ForceDPOnly cluster multicast pads the M x N tile grid; ForceDPOnly=0
+        // cluster reduction pads the [skGrid/Ck, Ck] grid. Both have a kernel
+        // pad-exit before the -3 cluster barrier. A ForceDPOnly=0 [Cs,1]
+        // (non-multicast) Stream-K cluster keeps develop's 1-D sk.grid launch.
         bool skClusterMulticast = sizeMapping.streamK != 0
                                   && sizeMapping.streamKForceDPOnly != 0 && enableCluster;
-        if(enableCluster && (sizeMapping.streamK == 0 || skClusterMulticast))
+        bool skClusterReduction = sizeMapping.streamK == 3
+                                  && sizeMapping.streamKForceDPOnly == 0
+                                  && sizeMapping.clusterDim.y > 1;
+        if(enableCluster
+           && (sizeMapping.streamK == 0 || skClusterMulticast || skClusterReduction))
         {
             rv.numWorkGroups.x = RoundUpToMultiple(rv.numWorkGroups.x, rv.clusterDim.x);
             rv.numWorkGroups.y = RoundUpToMultiple(rv.numWorkGroups.y, rv.clusterDim.y);
@@ -4436,6 +4474,18 @@ namespace TensileLite
                       > 1)
             {
                 skGrid = tiles;
+            }
+
+            // StreamK ForceDPOnly=0 cluster reduction: every tile is split Ck
+            // ways, so skGrid == Ck*tiles. The launch rounds gridX up to Cs;
+            // padded WGs pad-exit in the kernel prologue. Pure reduction [1,C]
+            // is Ck==C so this is C*tiles; factored [Cs,Ck] is Ck K-peers per
+            // tile, with Cs spatial tiles sharing a cluster.
+            if(self.sizeMapping.streamK == 3 && self.sizeMapping.streamKForceDPOnly == 0
+               && self.sizeMapping.clusterDim.y > 1)
+            {
+                size_t ck = static_cast<size_t>(self.sizeMapping.clusterDim.y);
+                skGrid    = ck * tiles;
             }
 
             return skGrid;

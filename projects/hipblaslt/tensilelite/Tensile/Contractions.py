@@ -537,6 +537,14 @@ class ProblemPredicate(Properties.Predicate):
             valuepredicates.append(state["GlobalSplitU"])
             rv += [cls('WorkgroupNumberCheck', index=0, value=valuepredicates)]
 
+        # ForceDPOnly=0 cluster reduction: skip problems whose itersPerTile is
+        # not a multiple of Ck (the split-barrier path assumes an even K-split).
+        if (state.get("StreamK", 0) == 3
+            and not state.get("StreamKForceDPOnly", 0)
+            and state.get("ClusterDim", [1, 1])[1] > 1):
+            rv += [cls("ClusterReductionIterCheck",
+                       value=[state["DepthU"], state["ClusterDim"][1]])]
+
         if not problemType.aType.isInt8x4():
             # calculate the minimum supported free dimension size
             TLUA = state['ProblemType']['TLUA']

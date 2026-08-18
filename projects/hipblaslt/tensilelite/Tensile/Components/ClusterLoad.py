@@ -10,7 +10,7 @@ Capability-selected (``HasTDM`` + ``TDMInst == 3``), like ``TensorDataMoverLoad`
 """
 
 from ..Component import ClusterLoad
-from ..Common import clusterEnabled, streamK2DMulticast, streamKMulticast
+from ..Common import clusterEnabled, streamK2DMulticast, streamKMulticast, streamKClusterReduction
 from typing import Mapping
 from rocisa.code import Module, Label
 from rocisa.container import sgpr
@@ -137,6 +137,12 @@ class ClusterLoadTDM(ClusterLoad):
             maskA |= (1 << (idx * kernel["ClusterDim"][0]))
 
         maskB = (1 << kernel["ClusterDim"][0]) - 1
+
+        # ForceDPOnly=0 factored [Cs,Ck]: Ck is K-split, not N-spatial A-multicast.
+        # Keep the spatial B-row mask ((1<<Cs)-1); A is a placeholder self bit.
+        # preLoop overwrites both once k is known.
+        if streamKClusterReduction(kernel):
+            maskA = 1
 
         # Reduce the broadcast mask to the WGs actually present in a padded boundary
         # cluster (grid rounded up to ClusterDim): writes maskColSgpr/maskRowSgpr and

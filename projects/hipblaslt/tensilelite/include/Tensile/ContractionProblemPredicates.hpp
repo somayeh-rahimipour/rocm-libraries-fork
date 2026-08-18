@@ -3115,6 +3115,61 @@ namespace TensileLite
                         problem, stream, "prob", problem.mxTypeB(), "==", "sol", value);
                 }
             };
+
+            struct ClusterReductionIterCheck
+                : public Predicate_CRTP<ClusterReductionIterCheck, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                std::array<int, 2> value;
+
+                ClusterReductionIterCheck() = default;
+                ClusterReductionIterCheck(std::array<int, 2> value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "ClusterReductionIterCheck";
+                }
+
+                static size_t itersPerTile(ContractionProblemGemm const& problem, int depthU)
+                {
+                    size_t k = 1;
+                    for(size_t i = 0; i < problem.boundIndices().size(); ++i)
+                        k *= problem.boundSize(i);
+                    if(depthU <= 0)
+                        return k;
+                    return (k + static_cast<size_t>(depthU) - 1) / static_cast<size_t>(depthU);
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    int c = value[1];
+                    if(c <= 1)
+                        return true;
+                    return (itersPerTile(problem, value[0]) % static_cast<size_t>(c)) == 0;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    int    c   = value[1];
+                    size_t ipt = itersPerTile(problem, value[0]);
+                    return debugEvalCmp(
+                        problem,
+                        stream,
+                        "StreamK cluster reduction requires iterations-per-tile ceil(K/DepthU)",
+                        ipt,
+                        "to be a multiple of ClusterDim[1]",
+                        "Ck",
+                        c);
+                }
+            };
         } // namespace Contraction
 
         /**
