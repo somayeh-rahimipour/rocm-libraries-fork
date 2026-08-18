@@ -7,6 +7,69 @@ Origami: Analytical GEMM Solution Selection
 Python bindings for the Origami C++ library.
 """
 
+import os
+import platform
+
+_IS_WINDOWS = platform.system() == "Windows"
+
+_ROCM_WHEEL_SHORTNAMES = ["amd_comgr", "amdhip64", "hiprtc", "origami"]
+
+
+def _preload_via_rocm_sdk() -> bool:
+    """Preload ROCm runtime libraries through rocm_sdk before importing the
+    compiled extension so its ``NEEDED liborigami.so.1`` and ``libamdhip64.so``
+    resolve to the SDK copies.
+
+    In a ROCm-wheel environment the native libraries ship inside sibling
+    ``_rocm_sdk_*`` packages that sit off the loader path and carry a build-time
+    version nonce in their names, so only rocm_sdk knows their locations; use its
+    public API rather than reimplementing that discovery. ``liborigami`` is one
+    of these off-path libraries -- it lives in the ``_rocm_sdk_libraries`` wheel,
+    not on ``LD_LIBRARY_PATH`` or on the extension's ``$ORIGIN`` RPATH -- so it is
+    named alongside the core runtime. Preloading it RTLD_GLOBAL both resolves the
+    extension's ``NEEDED liborigami.so.1`` and guarantees a single shared copy in
+    the process, so a co-loaded consumer (hipBLASLt, PyTorch) binds to the same
+    object rather than a second, layout-divergent one.
+
+    Returns True when rocm_sdk is installed and drove the preload, False
+    otherwise so the caller can fall back.
+    """
+    try:
+        import rocm_sdk
+    except ImportError:
+        return False
+    try:
+        rocm_sdk.initialize_process(preload_shortnames=_ROCM_WHEEL_SHORTNAMES)
+    except Exception:
+        pass
+    return True
+
+
+def _register_rocm_path_dir() -> None:
+    """Non-wheel installs -- a system ``/opt/rocm``, a ``.deb``, the Windows HIP
+    SDK, or a build tree -- where the runtime lives in one directory named by the
+    ``ROCM_PATH`` / ``HIP_PATH`` / ``ROCM_HOME`` environment variables.
+
+    On Windows that directory's ``bin/`` must be registered via
+    ``os.add_dll_directory`` because extension modules load with
+    ``LOAD_LIBRARY_SEARCH_DEFAULT_DIRS``, which excludes ``PATH`` and has no
+    RPATH equivalent. On Linux the dynamic loader already searches RPATH /
+    ldconfig / ``LD_LIBRARY_PATH``, so there is nothing to do.
+    """
+    if not _IS_WINDOWS:
+        return
+    for var in ("ROCM_PATH", "HIP_PATH", "ROCM_HOME"):
+        root = os.environ.get(var)
+        if root:
+            bin_dir = os.path.join(root, "bin")
+            if os.path.isdir(bin_dir):
+                os.add_dll_directory(bin_dir)
+                return
+
+
+if not _preload_via_rocm_sdk():
+    _register_rocm_path_dir()
+
 try:
     # Import the compiled extension module
     from .origami import (
@@ -92,8 +155,11 @@ try:
     )
 except ImportError as e:
     raise ImportError(
-        f"Failed to import origami extension module: {e}. "
-        "Please ensure the package is properly installed."
+        "Failed to import the origami compiled extension. Its ROCm "
+        "dependencies (liborigami, libamdhip64) were not found. Install the "
+        "ROCm wheels (`pip install rocm[libraries]`), or set ROCM_PATH / "
+        "HIP_PATH to a ROCm install or build tree (on Windows the directory "
+        f"containing the ROCm DLLs under bin/).\nOriginal error: {e}"
     ) from e
 
 __version__ = "0.1.0"

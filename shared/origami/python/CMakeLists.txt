@@ -8,7 +8,7 @@ project(origami-python VERSION 0.1.0 LANGUAGES CXX)
 # Find Python
 find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
 
-option(ORIGAMI_BUILD_FROM_SOURCE "Build origami from source instead of finding installed version" ON)
+option(ORIGAMI_BUILD_FROM_SOURCE "Build origami from source instead of finding installed version" OFF)
 option(ORIGAMI_PYTHON_ENABLE_WARNINGS "Enable compiler warnings for Python extension build" OFF)
 
 set(ORIGAMI_TARGET "")

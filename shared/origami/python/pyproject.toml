@@ -14,7 +14,7 @@ build-backend = "scikit_build_core.build"
 # Ensure CMAKE_PREFIX_PATH includes ROCm (default: /opt/rocm)
 
 [project]
-name = "origami"
+name = "rocm-origami"
 dynamic = ["version"]
 description = "Analytical GEMM Solution Selection"
 readme = "../README.md"
@@ -50,7 +50,7 @@ cmake.args = [
 ]
 # CMake defines - these can be overridden via environment
 # CMAKE_PREFIX_PATH will be used by python/CMakeLists.txt
-cmake.define = { }
+cmake.define = { ORIGAMI_BUILD_FROM_SOURCE = "OFF" }
 # Dynamic version from __init__.py
 metadata.version.provider = "scikit_build_core.metadata.regex"
 metadata.version.input = "src/origami/__init__.py"
