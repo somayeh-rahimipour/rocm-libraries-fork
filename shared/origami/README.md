@@ -27,13 +27,13 @@
 
 ### Prerequisites
 
-**ROCm/HIP**: This package requires ROCm/HIP to be installed on your system. ROCm cannot be installed via pip and must be installed separately. See the [ROCm Quick Start Guide](https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html) for installation instructions. Ensure `CMAKE_PREFIX_PATH` includes your ROCm install (default: `/opt/rocm`).
+**ROCm/HIP**: This package requires a ROCm/HIP install that includes the native Origami library (`liborigami` and its CMake package) — both are part of ROCm. See the [ROCm Quick Start Guide](https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html) for installation instructions. Ensure `CMAKE_PREFIX_PATH` includes your ROCm install (default: `/opt/rocm`) so `find_package(hip)` and `find_package(origami)` resolve.
 
-**Native Origami**: By default the Python extension is built against an already-installed native Origami library (`find_package(origami)`), not from source. Install `liborigami` and its CMake package first, and add its prefix to `CMAKE_PREFIX_PATH`. To build the native library from this source tree instead, pass `-DORIGAMI_BUILD_FROM_SOURCE=ON` (via `CMAKE_ARGS`).
+By default the Python extension is built against that installed `liborigami` (`find_package(origami)`), not from source. To build the native library from this source tree instead, pass `-DORIGAMI_BUILD_FROM_SOURCE=ON` (via `CMAKE_ARGS`).
 
 ### Install
 
-Build against an installed native Origami (default), pointing `CMAKE_PREFIX_PATH` at both ROCm and the Origami install prefix:
+Build against the installed native Origami (default), with `CMAKE_PREFIX_PATH` pointing at your ROCm install:
 
 ```bash
 pip install git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python

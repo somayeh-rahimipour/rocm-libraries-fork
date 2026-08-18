@@ -8,15 +8,14 @@ requires = [
 ]
 build-backend = "scikit_build_core.build"
 
-# NOTE: Building this package requires ROCm/HIP AND an installed native Origami
-# (liborigami + its CMake package) to be present on your system. ROCm cannot be
-# installed via pip and must be installed separately.
-# See: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
+# NOTE: Building this package requires a ROCm/HIP install that includes the
+# native Origami library (liborigami + its CMake package); both are part of
+# ROCm. See: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
 # By default (ORIGAMI_BUILD_FROM_SOURCE=OFF) the extension is built against the
-# installed liborigami via find_package(origami); set CMAKE_PREFIX_PATH so both
-# ROCm (default: /opt/rocm) and the Origami install prefix are discoverable.
-# To build the native library from the in-tree source instead, pass
-# -DORIGAMI_BUILD_FROM_SOURCE=ON.
+# installed liborigami via find_package(origami); set CMAKE_PREFIX_PATH so your
+# ROCm install (default: /opt/rocm) is discoverable, which resolves both
+# find_package(hip) and find_package(origami). To build the native library from
+# the in-tree source instead, pass -DORIGAMI_BUILD_FROM_SOURCE=ON.
 
 [project]
 name = "rocm-origami"
