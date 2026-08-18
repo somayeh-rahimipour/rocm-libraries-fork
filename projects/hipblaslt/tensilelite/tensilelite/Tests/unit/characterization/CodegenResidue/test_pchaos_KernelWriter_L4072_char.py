@@ -89,7 +89,7 @@ def test_half_plra_full_truth_table():
 
 def test_halfplra_derivation_site_is_bitwise_and():
     """
-    Pin that Tensile/SolutionStructs/Solution.py:2279 still derives HalfPLRA
+    Pin that tensilelite/SolutionStructs/Solution.py:2279 still derives HalfPLRA
     as bool(HalfPLR & 0x01) via AST inspection.
 
     If the derivation changes, this test will fail and the char classification
@@ -99,7 +99,7 @@ def test_halfplra_derivation_site_is_bitwise_and():
     import ast
     import textwrap
 
-    target_file = resolve_tensile_path("Tensile/SolutionStructs/Solution.py")
+    target_file = resolve_tensile_path("tensilelite/SolutionStructs/Solution.py")
     with open(target_file) as fh:
         source = fh.read()
 

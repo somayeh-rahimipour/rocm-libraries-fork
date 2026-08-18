@@ -56,7 +56,7 @@ hipBLASLt uses a **build-time** generator (Tensile, in-repo) to produce GPU kern
 
 ### Python environment for building device libraries
 
-The `tensilelite-device-libraries` target runs a Python script (`Tensile.TensileCreateLibrary`) that needs PyYAML, msgpack, etc. The build does not install them; it uses whatever Python CMake found. **Use a venv and install the Tensile requirements** so both the device-library step and the test-data generator (which also uses Python) have the right deps:
+The `tensilelite-device-libraries` target runs a Python script (`tensilelite.tensilelite_create_library`) that needs PyYAML, msgpack, etc. The build does not install them; it uses whatever Python CMake found. **Use a venv and install the TensileLite requirements** so both the device-library step and the test-data generator (which also uses Python) have the right deps:
 
 ```bash
 cd projects/hipblaslt
@@ -133,9 +133,9 @@ If you run from elsewhere, the test may not find the data file. For more run opt
 
 ## TensileLite Python tests (codegen / characterization)
 
-The sections above cover the **client** tests (`hipblaslt-test`, gtest, YAML data). The in-repo **TensileLite generator** has its own Python test suite under `tensilelite/Tensile/Tests/unit/`, including **characterization tests** that pin current behavior with [syrupy](https://github.com/syrupy-project/syrupy) `.ambr` golden files.
+The sections above cover the **client** tests (`hipblaslt-test`, gtest, YAML data). The in-repo **TensileLite generator** has its own Python test suite under `tensilelite/tensilelite/Tests/unit/`, including **characterization tests** that pin current behavior with [syrupy](https://github.com/syrupy-project/syrupy) `.ambr` golden files.
 
-If your change makes a characterization test fail, do **not** run a blanket `pytest --snapshot-update` (it rewrites every golden and destroys the safety net). Update only the affected node and review the diff. Full policy and the decision tree: [`tensilelite/Tensile/Tests/unit/characterization/README.md`](tensilelite/Tensile/Tests/unit/characterization/README.md).
+If your change makes a characterization test fail, do **not** run a blanket `pytest --snapshot-update` (it rewrites every golden and destroys the safety net). Update only the affected node and review the diff. Full policy and the decision tree: [`tensilelite/tensilelite/Tests/unit/characterization/README.md`](tensilelite/tensilelite/Tests/unit/characterization/README.md).
 
 ---
 
