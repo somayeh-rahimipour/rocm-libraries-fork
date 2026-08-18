@@ -16,8 +16,9 @@ scale  : float   (attention scale, e.g. 1/sqrt(D))
 causal : bool
 
 The out-parameter ABI is required for HIP graph replay stability.
-The kernel is compiled once per (Hq, Hk, D, causal, block_n) tuple and cached;
-``block_n`` is chosen from the key length by :func:`_pick_block_n`.
+The kernel is compiled once per (Hq, Hk, D, causal, block_n, k_lds) tuple and
+cached; the strategy pair is chosen from the key length by
+:func:`_pick_strategy`.
 """
 
 from __future__ import annotations
@@ -36,47 +37,73 @@ _SCHEMA = (
 )
 _ARCH = "gfx1151"
 
-# Kernel cache keyed by (num_query_heads, num_kv_heads, head_size, causal, block_n).
+# Kernel cache keyed by
+# (num_query_heads, num_kv_heads, head_size, causal, block_n, k_lds).
 _KERNEL_CACHE: dict[tuple, Any] = {}
 
 # Module-level torch.library handles kept alive for the process lifetime.
 _TORCH_LIBS: list[Any] = []
 _REGISTERED = False
 
-# (min_seqlen_k, block_n), ASCENDING in both columns; the last row that both
-# matches and exactly divides seqlen_k wins. Measured interleaved at
-# Hq32/Hk8/D128/causal/gqa_fuse=4: bn128 is -28%/-32%/-18% at S=1024/2048/3072
-# but +13%/+29% at S=4096/8192, where the kv working set outgrows the 2 MB L2.
-# bn256 spills 632 B and loses everywhere. rocke/docs/long_seq_scaling_08_17_2026.md
-_BLOCK_N_TABLE = ((0, 64), (4096, 128))
+# (min_seqlen_k, block_n, k_lds), ASCENDING in min_seqlen_k; the last row that
+# both matches and exactly divides seqlen_k wins.
+#
+# One row, because bn64+k_lds measured the fastest arm at EVERY sequence length
+# tried -- there is nothing to switch between. Interleaved, 3 reps, min per rep,
+# Hq32/Hk8/D128/causal/gqa_fuse=4, dispatch us (rocprofv3):
+#
+#   S     bn64    bn64+k_lds   bn128   Triton
+#   1024   279.7     269.4     396.0    423.3
+#   2048  1231.2    1112.8    1652.4   1795.4
+#   4096  7484.4    4730.7    6579.7   6341.1
+#   8192 37708.0   20936.7   28320.5  23945.4
+#
+# This retires the old two-row table. bn128 used to win past S=4096 by buying L0
+# hits with a bigger tile; staging K in LDS buys strictly more of them (L2
+# requests 59.0M -> 17.5M at S=8192) without bn128's 112 B of scratch, so bn128 is
+# now dominated at every S -- by 1.39x at S=4096 and 1.35x at S=8192. Dropping it
+# also widens eligibility, since bn64 divides every seqlen bn128 does and more.
+# k_lds is a bn64-only lever by LDS budget; see SwapQKCfg.k_lds and
+# rocke/docs/k_lds_staging_08_18_2026.md.
+_BLOCK_N_TABLE = ((0, 64, True),)
 
 # "auto" (default) walks the table; "64"/"128" pin it for A/B control arms.
 _BLOCK_N = os.environ.get("ROCKE_BLOCK_N", "auto")
+# "auto" (default) takes k_lds from the table; "0"/"1" pin it for A/B control.
+_K_LDS = os.environ.get("ROCKE_K_LDS", "auto")
 
 
-def _pick_block_n(seqlen_k: int) -> int:
-    """Largest measured-winning kv tile that EXACTLY divides ``seqlen_k``.
+def _pick_strategy(seqlen_k: int) -> tuple[int, bool]:
+    """Measured-winning ``(block_n, k_lds)`` for this key length.
 
-    Returns 0 when nothing divides. The kernel's kv loop bound is
-    ``seqlen_k // block_n``, which truncates the tail instead of masking it, so
-    a non-divisible launch is a wrong answer rather than a slow one -- callers
-    must treat 0 as "not eligible for swapqk".
+    ``block_n`` is 0 when no tile exactly divides ``seqlen_k``. The kernel's kv
+    loop bound is ``seqlen_k // block_n``, which truncates the tail instead of
+    masking it, so a non-divisible launch is a wrong answer rather than a slow
+    one -- callers must treat 0 as "not eligible for swapqk".
+
     """
+    best = (0, False)
+    for lo, bn, klds in _BLOCK_N_TABLE:
+        if seqlen_k >= lo and seqlen_k % bn == 0:
+            best = (bn, klds)
     if _BLOCK_N != "auto":
         bn = int(_BLOCK_N)
-        return bn if seqlen_k % bn == 0 else 0
-    best = 0
-    for lo, bn in _BLOCK_N_TABLE:
-        if seqlen_k >= lo and seqlen_k % bn == 0:
-            best = bn
+        best = (bn if seqlen_k % bn == 0 else 0, best[1])
+    if _K_LDS != "auto":
+        best = (best[0], _K_LDS == "1")
     return best
 
 
 def _get_launcher(
-    num_query_heads: int, num_kv_heads: int, head_size: int, causal: bool, block_n: int
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    causal: bool,
+    block_n: int,
+    k_lds: bool,
 ):
     """Return a compiled+cached (hsaco_bytes, kernel_name, block_size) triple."""
-    key = (num_query_heads, num_kv_heads, head_size, causal, block_n)
+    key = (num_query_heads, num_kv_heads, head_size, causal, block_n, k_lds)
     if key in _KERNEL_CACHE:
         return _KERNEL_CACHE[key]
 
@@ -90,6 +117,7 @@ def _get_launcher(
         mask_mode="causal" if causal else "none",
         v_transposed=True,
         block_n=block_n,
+        k_lds=k_lds,
     )
     ok, why = is_valid_spec(cfg, _ARCH)
     if not ok:
@@ -116,16 +144,16 @@ def _launch_swapqk(q, k, v, out, scale: float, causal: bool) -> None:
     B, Sq, Hq, D = q.shape
     _B, Sk, Hk, _D = k.shape
 
-    block_n = _pick_block_n(Sk)
+    block_n, k_lds = _pick_strategy(Sk)
     if block_n == 0:
         raise RuntimeError(
             f"swapqk cannot serve seqlen_k={Sk}: the kv loop truncates rather "
             f"than masks its tail, so seqlen_k must be a multiple of one of the "
-            f"supported kv tiles {sorted({bn for _, bn in _BLOCK_N_TABLE})}"
+            f"supported kv tiles {sorted({bn for _, bn, _k in _BLOCK_N_TABLE})}"
         )
 
     hsaco, kernel_name, block_size, fn, module, rt, cfg = _get_launcher(
-        Hq, Hk, D, causal, block_n
+        Hq, Hk, D, causal, block_n, k_lds
     )
 
     from kernels.gfx1151.wmma_fmha_swapqk import swapqk_grid, swapqk_transpose_v

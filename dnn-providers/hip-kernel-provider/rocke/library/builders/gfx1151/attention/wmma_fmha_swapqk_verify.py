@@ -87,6 +87,11 @@ def main() -> int:
         default=1,
         help="query heads sharing a kv head fused into one CTA (wave-per-head)",
     )
+    p.add_argument(
+        "--k-lds",
+        action="store_true",
+        help="stage the K tile in shared LDS (block_n=64 only; V stays on the gather)",
+    )
     p.add_argument("--tol", type=float, default=2e-2)
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--warmup", type=int, default=15)
@@ -112,6 +117,7 @@ def main() -> int:
         sched_mode=args.sched_mode,
         lazy_rescale=bool(args.lazy_rescale),
         gqa_fuse=args.gqa_fuse,
+        k_lds=args.k_lds,
     )
     ok, why = is_valid_spec(cfg, args.arch)
     if not ok:

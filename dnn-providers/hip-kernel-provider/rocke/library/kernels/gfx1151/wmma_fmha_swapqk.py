@@ -336,6 +336,30 @@ class SwapQKCfg:
     # lesson holds even in the L4096 DRAM-bound regime: on this large-cache APU,
     # barriers + LDS traffic cost more than the KV re-reads they remove.
     kv_lds: bool = False
+    # k_lds: stage ONLY K in shared LDS; V stays on v_transposed + buffer_gather +
+    # dual_gather, untouched. This is the surviving half of the kv_lds prototype
+    # above, retried because the premise changed on all three of its recorded root
+    # causes:
+    #   (1) vgpr/spill -- the coop loader's live payload is
+    #       block_n*hs*2 / (block_size*4) VGPR. kv_lds staged K+V across 64 threads
+    #       = 128 VGPR; K-only across a 256-thread (gqa_fuse=4) CTA = 16 VGPR, an 8x
+    #       cut, and the chunk row/col div+mod is loop-invariant so it hoists out.
+    #   (2) dsld 0->320 was entirely a V problem: the flat LDS V read is 16
+    #       uncoalesced scalar ds_loads per fragment. K costs 64 ds_read_b128.
+    #   (3) 2 barriers/tile still cost, but the tile is now shared by 8 waves
+    #       (gqa_fuse=4, W=2) instead of 2 -- 4x the amortization.
+    # Instruction count is a WASH (vmem 96->36, +64 ds_read +4 ds_write = +8 on a
+    # ~1019-instruction loop). What changes is composition: per CTA the K request
+    # count drops 512->32 for the same 16 KB of unique bytes (half of today's K
+    # requests are pure address-pipe waste -- the A-operand row is lane%16, so lanes
+    # l and l+16 issue identical addresses), and 16 KB of L0 footprint is handed
+    # back to V. The bet is doc long_seq_scaling_08_17_2026 SS4-5: that the
+    # long-sequence loss to Triton is L0 (32 KB/CU) thrash.
+    # A bn64-ONLY lever, by LDS budget: a padded K tile is block_n*(hs+8)*2 B, so
+    # bn64/D128 = 17 KB -> 3 WGs/CU still fit in 64 KB and occupancy stays 24
+    # waves/CU; bn128 = 35 KB collapses it to 1 WG. So this COMPETES with
+    # block_n=128 at long S rather than stacking with it (see is_valid_spec).
+    k_lds: bool = False
     # o_f16: carry the O accumulator across the K-loop as f16 (32 VGPR for D128)
     # instead of f32 (64 VGPR), and REORDER the PV to d-pair-outer / ns-inner so
     # each O d-pair is fully accumulated (both kv sub-tiles) then immediately
@@ -819,6 +843,9 @@ class SwapQKCfg:
             # keep F==1 names byte-identical to the pre-fusion kernel, but NEVER
             # let a fused build share a cache key with the unfused one.
             *((f"gf{self.gqa_fuse}",) if self.gqa_fuse > 1 else ()),
+            # same rule as gf: keep every pre-k_lds name byte-identical, but never
+            # let the artifact cache serve a non-LDS binary for an LDS config.
+            *(("klds",) if self.k_lds else ()),
         )
 
 
@@ -878,6 +905,47 @@ def is_valid_spec(cfg: SwapQKCfg, arch: str = "gfx1151") -> "tuple[bool, str]":
             # Q_lds is indexed by wave_id, which no longer maps 1:1 to a query
             # block once waves are split across heads.
             return False, "gqa_fuse is incompatible with q_lds"
+        if cfg.kv_lds:
+            # kv_lds' coop loader sizes itself from n_waves alone, so in a
+            # gqa_fuse-widened CTA the surplus threads stage rows past block_n and
+            # corrupt LDS. k_lds' loader is sized from block_size and is fine.
+            return False, "gqa_fuse is incompatible with kv_lds (use k_lds)"
+    if cfg.k_lds:
+        if cfg.kv_lds:
+            return False, "k_lds and kv_lds both stage K; pick one"
+        if cfg.k_dual:
+            # k_dual halves K's per-fragment GLOBAL loads; k_lds deletes all of
+            # them. Mutually exclusive by construction.
+            return False, "k_dual reads K from global; incompatible with k_lds"
+        if cfg.num_persistent:
+            return (
+                False,
+                "num_persistent is incompatible with k_lds: the LDS allocation "
+                "sits inside what becomes the work-item loop",
+            )
+        if cfg.q_block > 1:
+            # the q_block>1 path builds its own K-loop and never calls the loader.
+            return False, "k_lds is implemented on the q_block==1 path"
+        if cfg.pipeline:
+            # pipeline computes tile kt+1's QK inside iteration kt, but the loader
+            # stages tile kt -- the pipelined QK would read the wrong tile.
+            return False, "k_lds is incompatible with pipeline (QK runs one tile ahead)"
+        if cfg.v_prefetch:
+            # sync_lds_only only waits lgkmcnt, but the ds_write depends on the K
+            # global load, so the compiler inserts an in-order vmcnt wait that
+            # would also drain V gathers carried ACROSS iterations by v_prefetch.
+            return False, "k_lds is incompatible with v_prefetch"
+        if cfg.block_n != 64:
+            # LDS budget: block_n*(head_size+8)*2 B per WG. bn128/D128 = 35 KB
+            # leaves room for 1 WG in the 64 KB LDS and occupancy collapses.
+            return False, f"k_lds is a block_n=64 lever (got block_n={cfg.block_n})"
+        _tot = cfg.block_n * cfg.head_size
+        if _tot % (cfg.block_size * 8) != 0:
+            return (
+                False,
+                f"k_lds coop loader needs block_n*head_size ({_tot}) divisible by "
+                f"block_size*8 ({cfg.block_size * 8})",
+            )
     return True, ""
 
 
@@ -995,10 +1063,10 @@ def build_wmma_fmha_swapqk(
                 "num_persistent is implemented on the MQ==1 path (the q_block>1 path "
                 "builds its own kernel and returns early); MQ=2 does not fit at D=128"
             )
-        if cfg.q_lds or cfg.kv_lds:
+        if cfg.q_lds or cfg.kv_lds or cfg.k_lds:
             raise ValueError(
-                "num_persistent is incompatible with q_lds/kv_lds: those allocate LDS "
-                "inside what becomes the work-item loop"
+                "num_persistent is incompatible with q_lds/kv_lds/k_lds: those "
+                "allocate LDS inside what becomes the work-item loop"
             )
         if seqlen_q is None:
             raise ValueError(
@@ -1191,8 +1259,23 @@ def build_wmma_fmha_swapqk(
                 f"k_dual needs an even n_kv_sub (block_n>=32), got n_kv_sub="
                 f"{cfg.block_n // 16} at block_n={cfg.block_n}"
             )
+        if cfg.kv_lds or cfg.k_lds:
+            raise ValueError("k_dual reads K from global; incompatible with k(v)_lds")
+    if cfg.k_lds:
         if cfg.kv_lds:
-            raise ValueError("k_dual reads K from global; incompatible with kv_lds")
+            raise ValueError("k_lds and kv_lds both stage K; pick one")
+        if MQ > 1:
+            raise ValueError("k_lds is implemented on the q_block==1 path")
+        if cfg.pipeline:
+            raise ValueError(
+                "k_lds is incompatible with pipeline: the loader stages tile kt "
+                "while the pipelined QK consumes tile kt+1"
+            )
+        if cfg.v_prefetch:
+            raise ValueError(
+                "k_lds is incompatible with v_prefetch: the staging ds_write forces "
+                "an in-order vmcnt wait that would also drain the carried V gathers"
+            )
     if cfg.qk_douter and MQ > 1:
         raise ValueError(
             "qk_douter applies to the MQ==1 QK loop; the q_block>1 path has its "
@@ -1547,53 +1630,67 @@ def build_wmma_fmha_swapqk(
         hi = Q_lds.load_vec(b, [wave_id, row, b.const_i32(d * 16 + 8)], n=8)
         return WmmaTensor(atom, "b", b.vec_concat(lo, hi), arch)
 
-    # ---- kv_lds: cooperative K/V tile staging in shared LDS (large-L prototype) ----
+    # ---- k_lds / kv_lds: cooperative K(/V) tile staging in shared LDS ----
+    # k_lds stages K only and leaves V on the buffer gather; kv_lds (the older,
+    # measured-dead-end prototype) also stages V and forces the flat V read.
+    _KLDS = cfg.k_lds or cfg.kv_lds
     K_lds = V_lds = None
-    if cfg.kv_lds:
-        _KVPAD = 8  # bank-pad on the d row (K/V read consecutive d per token)
-        _kv_strides = (block_n * (hs + _KVPAD), hs + _KVPAD, 1)
-        K_lds = make_lds_view(
-            b,
-            dtype=dtype_ir,
-            shape=(1, block_n, hs),
-            strides=_kv_strides,
-            name_hint="Ksh",
-        )
-        V_lds = make_lds_view(
-            b,
-            dtype=dtype_ir,
-            shape=(1, block_n, hs),
-            strides=_kv_strides,
-            name_hint="Vsh",
-        )
-        _nthreads = wave * W
+    if _KLDS:
+        # Bank-pad the d row. Row stride (hs+8) f16 = 68 dwords at D128, and
+        # 68 mod 32 = 4: ds_read_b128 is serviced 8 lanes/pass (8 x 4 dwords = 32
+        # banks) and lane l touches banks 4l..4l+3, so lanes 0-7 tile banks 0-31
+        # exactly once -> conflict-free. Lanes 16-31 repeat lanes 0-15' addresses
+        # (A-operand row is lane%16) and broadcast for free. Conflict-freedom needs
+        # (hs+p)/2 == 4 (mod 32) i.e. p == 8 (mod 64), and ds_read_b128 needs 16 B
+        # alignment so p must be a multiple of 8 anyway: p=8 is the unique minimum,
+        # and p=0 would be an 8-way conflict. No swizzle required.
+        _KVPAD = 8
+        # Carry the pad in the SHAPE, not in explicit strides: make_lds_view sizes
+        # the smem_alloc from shape alone, so shape=(1,block_n,hs) with padded
+        # strides under-allocates by block_n*_KVPAD elements and the last rows run
+        # off the end of the block's LDS. The packed strides of the padded shape
+        # are exactly the strides we want.
+        _kv_shape = (1, block_n, hs + _KVPAD)
+        K_lds = make_lds_view(b, dtype=dtype_ir, shape=_kv_shape, name_hint="Ksh")
+        if cfg.kv_lds:
+            V_lds = make_lds_view(b, dtype=dtype_ir, shape=_kv_shape, name_hint="Vsh")
+        # The whole CTA cooperates. n_waves*32 would undercount by gqa_fuse and let
+        # the surplus threads stage rows past block_n, corrupting LDS.
+        _nthreads = cfg.block_size
         _tot = block_n * hs
         if _tot % (_nthreads * 8) != 0:
             raise ValueError(
-                f"kv_lds coop loader needs block_n*hs ({_tot}) divisible by "
-                f"n_threads*8 ({_nthreads * 8}); block_n={block_n} hs={hs} W={W}"
+                f"kv/k_lds coop loader needs block_n*hs ({_tot}) divisible by "
+                f"block_size*8 ({_nthreads * 8}); block_n={block_n} hs={hs} "
+                f"block_size={_nthreads}"
             )
         _kv_chunks = _tot // (_nthreads * 8)
         _c8 = b.const_i32(8)
         _c_hs = b.const_i32(hs)
+        # (row, colc) within the tile are loop-INVARIANT -- only the global token
+        # (kbase_tok + row) moves with the K-tile. Hoisting the div/mod out of the
+        # K-loop leaves one v_add per chunk per tile, which is the other half of
+        # the kv_lds VGPR/spill root cause.
+        _chunk_rc = []
+        for i in range(_kv_chunks):
+            _c = b.add(tid, b.const_i32(i * _nthreads))
+            _base = b.mul(_c, _c8)
+            _chunk_rc.append((b.div(_base, _c_hs), b.mod(_base, _c_hs)))
 
-    def coop_load_kv(k_block_base):
-        """All W waves cooperatively stream this K-tile's K and V (block_n x hs)
-        from global -> shared LDS once; every wave then reads from LDS. Two
+    def coop_load_k(k_block_base):
+        """Whole CTA cooperatively streams this K-tile (block_n x hs) from global
+        -> shared LDS once; every wave then reads its fragments from LDS. Two
         barriers/tile: before overwrite (prev readers done) + after store (tile
-        visible to all waves)."""
+        visible to all waves). Under kv_lds the same pass also stages V."""
         b.sync_lds_only()  # prev iter's LDS readers finish before we overwrite
         kbase_tok = b.add(batch_tok_k, k_block_base)
-        for i in range(_kv_chunks):
-            c = b.add(tid, b.const_i32(i * (wave * W)))
-            base = b.mul(c, _c8)
-            row = b.div(base, _c_hs)
-            colc = b.mod(base, _c_hs)
+        for row, colc in _chunk_rc:
             gtok = b.add(kbase_tok, row)
             k8 = K_view.load_vec(b, [kv_head, gtok, colc], n=8)
             K_lds.store_vec(b, [c0, row, colc], k8, 8)
-            v8 = V_view.load_vec(b, [kv_head, gtok, colc], n=8)
-            V_lds.store_vec(b, [c0, row, colc], v8, 8)
+            if cfg.kv_lds:
+                v8 = V_view.load_vec(b, [kv_head, gtok, colc], n=8)
+                V_lds.store_vec(b, [c0, row, colc], v8, 8)
         b.sync_lds_only()  # freshly-staged tile visible to all waves
 
     def k_lds_read(ns, d):
@@ -1610,7 +1707,7 @@ def build_wmma_fmha_swapqk(
         )
 
     def _k_frag(kwin, ns, d):
-        if cfg.kv_lds:
+        if _KLDS:
             return k_lds_read(ns, d)  # K from shared LDS (2x vec8)
         return load_wmma_tile(b, kwin, atom, lane, role="a", k_offset=d * 16, lead=[c0])
 
@@ -1659,7 +1756,7 @@ def build_wmma_fmha_swapqk(
             # and no separate acc_ilp / tail reduction is needed.
             kwins = (
                 [None] * n_kv_sub
-                if cfg.kv_lds or cfg.k_dual
+                if _KLDS or cfg.k_dual
                 else [
                     k_window(b.add(k_block_base, b.const_i32(ns * 16)))
                     for ns in range(n_kv_sub)
@@ -1680,7 +1777,7 @@ def build_wmma_fmha_swapqk(
         else:
             for ns in range(n_kv_sub):
                 kwin = None
-                if not cfg.kv_lds:
+                if not _KLDS:
                     kwin = k_window(b.add(k_block_base, b.const_i32(ns * 16)))
                 acc_ilp = [WmmaTensor.zero_acc(b, atom, arch=arch) for _ in range(ilp)]
                 for d in range(n_dk):
@@ -1932,10 +2029,10 @@ def build_wmma_fmha_swapqk(
         if cfg.iglp >= 0:
             b.iglp_opt(cfg.iglp)
 
-        # kv_lds: cooperatively stage this K-tile's K and V into shared LDS
-        # BEFORE the QK/PV read them (all W waves then share the one copy).
-        if cfg.kv_lds:
-            coop_load_kv(k_block_base)
+        # k_lds/kv_lds: cooperatively stage this K-tile into shared LDS BEFORE the
+        # QK reads it (the whole CTA then shares the one copy).
+        if _KLDS:
+            coop_load_k(k_block_base)
 
         # ---- QK: S^T = K @ Q^T. Pipelined -> consume the carried current-tile
         # scores and issue the NEXT tile's QK now (overlaps this tile's softmax/

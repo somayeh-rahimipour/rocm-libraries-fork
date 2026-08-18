@@ -89,6 +89,7 @@ class TestSwapQKDefaults(unittest.TestCase):
             "static_shape",
             "prefetch_v",
             "k_dual",
+            "k_lds",
         ):
             self.assertFalse(getattr(cfg, knob), f"{knob} must default off")
         self.assertEqual(cfg.v_kblock, 0)
@@ -268,6 +269,22 @@ class TestSwapQKLowering(unittest.TestCase):
             ll.count("readfirstlane"), self._lower(base).count("readfirstlane")
         )
 
+    def test_k_lds_stages_k_in_lds_while_v_keeps_the_buffer_gather(self):
+        # The single assertion that separates k_lds from its kv_lds predecessor:
+        # K moves to addrspace(3) and V does NOT. If a later edit made k_lds fall
+        # through to the flat V path it would still compile and still be numerically
+        # correct, and it would re-run the experiment that already lost 3x.
+        ll = self._lower(
+            _prod_cfg(num_kv_heads=6, gqa_fuse=4, mask_mode="causal", k_lds=True)
+        )
+        self.assertIn("addrspace(3)", ll)
+        self.assertIn("llvm.amdgcn.s.barrier", ll)
+        self.assertIn("raw.ptr.buffer.load", ll)  # V still on the gather
+        base = self._lower(
+            _prod_cfg(num_kv_heads=6, gqa_fuse=4, mask_mode="causal")
+        )
+        self.assertNotIn("addrspace(3)", base)
+
     def test_distinct_configs_build_distinct_kernels(self):
         a = build_wmma_fmha_swapqk(_prod_cfg(), arch="gfx1151")
         b = build_wmma_fmha_swapqk(_prod_cfg(block_n=32), arch="gfx1151")
@@ -378,38 +395,32 @@ class TestSwapQKCausalTrim(unittest.TestCase):
 
 
 class TestSwapQKAdaptiveBlockN(unittest.TestCase):
-    """The torch op picks block_n from the key length.
+    """The torch op picks ``(block_n, k_lds)`` from the key length.
 
     The divisibility half of this is a CORRECTNESS gate, not a perf knob: the kv
     loop bound is ``seqlen_k // block_n``, so a non-divisible launch drops the
-    tail silently. The threshold half encodes the measured L2 crossover.
+    tail silently.
     """
 
     @staticmethod
     def _pick():
-        from rocke.instances.gfx1151.wmma_fmha_swapqk import _pick_block_n
+        from rocke.instances.gfx1151.wmma_fmha_swapqk import _pick_strategy
 
-        return _pick_block_n
+        return _pick_strategy
 
-    def test_table_thresholds(self):
+    def test_bn64_plus_k_lds_at_every_length(self):
+        # bn64+k_lds measured fastest at every S tried, so the table is one row
+        # and the long-sequence promotion to bn128 is gone.
         pick = self._pick()
-        self.assertEqual(pick(2048), 64)
-        self.assertEqual(pick(3072), 64)
-        self.assertEqual(pick(4096), 128)
-        self.assertEqual(pick(8192), 128)
-
-    def test_demotes_when_the_wider_tile_does_not_divide(self):
-        # Past the threshold but not 128-aligned: must fall back rather than
-        # truncate 64 keys.
-        pick = self._pick()
-        self.assertEqual(pick(4160), 64)
+        for s in (1024, 2048, 3072, 4096, 8192):
+            self.assertEqual(pick(s), (64, True), f"seqlen_k={s}")
 
     def test_rejects_lengths_no_tile_divides(self):
         # 2080 is 32-aligned, which the old vLLM gate accepted while running
         # bn64 -- that silently dropped the last 32 keys.
         pick = self._pick()
-        self.assertEqual(pick(2080), 0)
-        self.assertEqual(pick(48), 0)
+        self.assertEqual(pick(2080)[0], 0)
+        self.assertEqual(pick(48)[0], 0)
 
     def test_env_pin_still_honours_divisibility(self):
         import rocke.instances.gfx1151.wmma_fmha_swapqk as inst
@@ -417,13 +428,27 @@ class TestSwapQKAdaptiveBlockN(unittest.TestCase):
         prev = inst._BLOCK_N
         try:
             inst._BLOCK_N = "128"
-            self.assertEqual(inst._pick_block_n(8192), 128)
-            # A pin overrides the length thresholds but NOT divisibility: 576 is
-            # 64-aligned, which "auto" would happily serve, and the pin must not.
-            self.assertEqual(inst._pick_block_n(2048), 128)
-            self.assertEqual(inst._pick_block_n(576), 0)
+            self.assertEqual(inst._pick_strategy(8192)[0], 128)
+            # A pin overrides the table but NOT divisibility: 576 is 64-aligned,
+            # which "auto" would happily serve, and the pin must not.
+            self.assertEqual(inst._pick_strategy(2048)[0], 128)
+            self.assertEqual(inst._pick_strategy(576)[0], 0)
         finally:
             inst._BLOCK_N = prev
+
+    def test_k_lds_env_pin_gives_an_ab_control_arm(self):
+        # Every A/B in the k_lds write-up was run through this pin; without it
+        # the two arms cannot be compared in one process.
+        import rocke.instances.gfx1151.wmma_fmha_swapqk as inst
+
+        prev = inst._K_LDS
+        try:
+            inst._K_LDS = "0"
+            self.assertEqual(inst._pick_strategy(8192), (64, False))
+            inst._K_LDS = "1"
+            self.assertEqual(inst._pick_strategy(8192), (64, True))
+        finally:
+            inst._K_LDS = prev
 
     def test_the_two_tiles_cannot_share_a_cache_key(self):
         # An artifact cache collision here would serve bn64 code for a bn128
@@ -432,6 +457,111 @@ class TestSwapQKAdaptiveBlockN(unittest.TestCase):
             _prod_cfg(block_n=64).kernel_name(),
             _prod_cfg(block_n=128).kernel_name(),
         )
+
+
+class TestSwapQKKLds(unittest.TestCase):
+    """k_lds stages K (and only K) in shared LDS.
+
+    Its predecessor kv_lds staged K AND V and lost 3x; the two things that make
+    this a different bet -- V staying on the buffer gather, and the tile being
+    shared by a gqa_fuse-widened CTA -- are exactly the two things a later edit
+    could undo while everything still compiled and still computed correct
+    attention. So they are pinned here rather than left to the field docs.
+    """
+
+    LDS_PER_CU = 64 * 1024
+
+    @staticmethod
+    def _fused(**kw):
+        return _prod_cfg(num_kv_heads=6, gqa_fuse=4, k_lds=True, **kw)
+
+    @staticmethod
+    def _lds_bytes(cfg) -> int:
+        # one padded K tile: block_n rows of (head_size + 8) f16
+        return cfg.block_n * (cfg.head_size + 8) * 2
+
+    def test_fused_k_lds_config_is_valid(self):
+        ok, why = is_valid_spec(self._fused())
+        self.assertTrue(ok, why)
+
+    def test_v_stays_on_the_buffer_gather(self):
+        # The recorded kv_lds root cause "dsld 0->320" was ENTIRELY a V problem:
+        # the flat LDS V read is 16 uncoalesced scalar ds_loads per fragment. If
+        # k_lds ever forced v_transposed off it would inherit that and this whole
+        # line of work would be the failed experiment again under a new name.
+        cfg = self._fused()
+        self.assertTrue(cfg.v_transposed)
+        self.assertTrue(cfg.buffer_gather)
+        self.assertTrue(cfg.dual_gather)
+        ok, why = is_valid_spec(cfg)
+        self.assertTrue(ok, why)
+
+    def test_lds_budget_keeps_three_workgroups_resident(self):
+        # 24 waves/CU is the occupancy the kernel is tuned at. bn64/D128 needs
+        # 17 KB so 3 WGs still fit; anything that pushed it past ~21 KB would
+        # silently drop to 2 WGs and cost a third of the latency hiding.
+        cfg = self._fused()
+        per_wg = self._lds_bytes(cfg)
+        self.assertEqual(per_wg, 64 * 136 * 2)
+        self.assertLessEqual(3 * per_wg, self.LDS_PER_CU)
+        self.assertLessEqual(per_wg, 21 * 1024)
+
+    def test_block_n_128_is_rejected_because_the_tile_evicts_occupancy(self):
+        # 128*(128+8)*2 = 34 KB leaves room for ONE workgroup. This is why k_lds
+        # is an ALTERNATIVE to block_n=128 at long sequences, not a stack with it.
+        wide = self._fused(block_n=128)
+        self.assertGreater(2 * self._lds_bytes(wide), self.LDS_PER_CU)
+        ok, why = is_valid_spec(wide)
+        self.assertFalse(ok)
+        self.assertIn("block_n", why)
+
+    def test_coop_loader_divides_evenly_over_the_cta(self):
+        # Each thread stages whole vec8 chunks; a remainder would leave part of
+        # the tile unwritten -- stale LDS, silently wrong scores.
+        cfg = self._fused()
+        self.assertEqual(cfg.block_size, 256)
+        self.assertEqual((cfg.block_n * cfg.head_size) % (cfg.block_size * 8), 0)
+        ok, why = is_valid_spec(_prod_cfg(head_size=64, block_n=64, k_lds=True, n_waves=2))
+        self.assertTrue(ok, why)  # 64*64 = 4096 over 64*8 = 512 -> 8 chunks
+
+    def test_rejects_knobs_that_also_own_the_k_operand_or_the_tile_lifetime(self):
+        for kw, token in (
+            (dict(kv_lds=True), "kv_lds"),
+            (dict(k_dual=True, qk_douter=True), "k_dual"),
+            (dict(pipeline=True), "pipeline"),
+            (dict(v_prefetch=2), "v_prefetch"),
+            (dict(q_block=2), "q_block"),
+        ):
+            ok, why = is_valid_spec(self._fused(**kw))
+            self.assertFalse(ok, f"{token} must be rejected with k_lds")
+            self.assertIn(token, why)
+
+    def test_rejects_persistent_which_would_allocate_lds_in_the_work_item_loop(self):
+        ok, why = is_valid_spec(_prod_cfg(k_lds=True, num_persistent=960))
+        self.assertFalse(ok)
+        self.assertIn("num_persistent", why)
+
+    def test_kv_lds_with_gqa_fuse_is_rejected(self):
+        # The kv_lds coop loader sizes itself from n_waves alone, so in a
+        # 256-thread fused CTA threads 64-255 stage rows past block_n and corrupt
+        # LDS. Reachable before k_lds existed; guarded now.
+        ok, why = is_valid_spec(_prod_cfg(num_kv_heads=6, gqa_fuse=4, kv_lds=True))
+        self.assertFalse(ok)
+        self.assertIn("kv_lds", why)
+
+    def test_kernel_name_gains_klds_and_is_otherwise_unchanged(self):
+        # Same rule as gf: the artifact cache is keyed on this string, so an
+        # LDS build must never be served a non-LDS binary -- while every
+        # pre-k_lds name stays byte-identical.
+        base = _prod_cfg(num_kv_heads=6, gqa_fuse=4)
+        self.assertNotIn("klds", base.kernel_name())
+        lds = _prod_cfg(num_kv_heads=6, gqa_fuse=4, k_lds=True)
+        self.assertEqual(lds.kernel_name(), base.kernel_name() + "_klds")
+
+    def test_builder_raises_on_the_incompatible_pairs(self):
+        for kw in (dict(kv_lds=True), dict(pipeline=True), dict(v_prefetch=2)):
+            with self.assertRaises(ValueError):
+                build_wmma_fmha_swapqk(self._fused(**kw), arch="gfx1151")
 
 
 class TestSwapQKVRelay(unittest.TestCase):
@@ -489,6 +619,20 @@ class TestSwapQKCodeObject(unittest.TestCase):
         res = _resources(self, art)
         self.assertIsNotNone(res.vgpr_count, "no VGPR count in the code object")
         self.assertLessEqual(res.vgpr_count, 208, "lost a wave: VGPR past 7/SIMD")
+        self.assertEqual(res.scratch_bytes or 0, 0, "spilled to scratch")
+
+    def test_k_lds_allocates_the_PADDED_tile_and_does_not_spill(self):
+        # The allocation is sized from the view's SHAPE, so carrying the bank pad
+        # in explicit strides instead reserves block_n*head_size and then writes
+        # block_n*(head_size+8) -- the last rows land past the end of the block's
+        # LDS. Silent, and it corrupts whichever block is allocated next.
+        cfg = _prod_cfg(num_kv_heads=6, gqa_fuse=4, mask_mode="causal", k_lds=True)
+        res = _resources(self, self._compile(cfg))
+        self.assertEqual(res.lds_bytes, 64 * (128 + 8) * 2)
+        # 3 workgroups must still fit, and the coop loader must not have cost the
+        # registers that sank its kv_lds predecessor (197 -> 256 + 16 B spill).
+        self.assertLessEqual(3 * res.lds_bytes, 64 * 1024)
+        self.assertLessEqual(res.vgpr_count, 232)
         self.assertEqual(res.scratch_bytes or 0, 0, "spilled to scratch")
 
     def test_d64_has_register_headroom(self):
