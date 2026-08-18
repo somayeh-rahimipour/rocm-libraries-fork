@@ -22,11 +22,27 @@ if(ORIGAMI_TARGET)
     # Origami already exists in this CMake tree; reuse it to avoid duplicate targets.
 elseif(ORIGAMI_BUILD_FROM_SOURCE)
     set(ORIGAMI_ENABLE_PYTHON OFF CACHE BOOL "Build origami python bindings" FORCE)
+    message(STATUS
+        "origami-python: forcing ORIGAMI_BUILD_SHARED_LIBS=ON for the from-source "
+        "build so the extension dynamically links liborigami instead of embedding it"
+    )
+    set(ORIGAMI_BUILD_SHARED_LIBS ON)
     add_subdirectory("${PROJECT_SOURCE_DIR}/.." origami_build EXCLUDE_FROM_ALL)
     set(ORIGAMI_TARGET roc::origami)
 else()
     find_package(origami REQUIRED)
     set(ORIGAMI_TARGET roc::origami)
+endif()
+
+get_target_property(ORIGAMI_TARGET_TYPE ${ORIGAMI_TARGET} TYPE)
+if(ORIGAMI_TARGET_TYPE STREQUAL "STATIC_LIBRARY")
+    message(FATAL_ERROR
+        "origami resolved to a STATIC library (${ORIGAMI_TARGET}). Linking it would "
+        "embed a private copy of origami into the Python extension and collide with "
+        "the system liborigami at runtime. Provide a shared liborigami: install or "
+        "build it with ORIGAMI_BUILD_SHARED_LIBS=ON, or in a super-build set "
+        "-DORIGAMI_BUILD_SHARED_LIBS=ON before enabling ORIGAMI_ENABLE_PYTHON."
+    )
 endif()
 
 find_package(hip REQUIRED)
