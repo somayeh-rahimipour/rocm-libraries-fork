@@ -691,9 +691,9 @@ Phase 3 action, not something completed in this planning pass.
 
 The wheel was built via the real `pip` / `scikit-build-core` standalone path
 inside `rocm/dev-ubuntu-22.04` (ROCm on the image; no outer `roc::origami`
-target; default `ORIGAMI_BUILD_FROM_SOURCE=ON`). Reproduction script and log:
-[`.handoff/origami-py-phase2/readelf_experiment.sh`](./.handoff/origami-py-phase2/readelf_experiment.sh),
-`readelf_experiment.log`.
+target; default `ORIGAMI_BUILD_FROM_SOURCE=ON`). The reproduction script and log
+(`readelf_experiment.sh` / `readelf_experiment.log`) live as session-local
+artifacts under `.handoff/origami-py-phase2/` and are not tracked in the repo.
 
 - Built wheel: `origami-0.1.0-cp310-cp310-linux_x86_64.whl` -- a
   **per-CPython-version** tag (`cp310-cp310`), not `abi3`. This directly

@@ -8,17 +8,22 @@ requires = [
 ]
 build-backend = "scikit_build_core.build"
 
-# NOTE: Building this package requires ROCm/HIP to be installed on your system.
-# ROCm cannot be installed via pip and must be installed separately.
+# NOTE: Building this package requires ROCm/HIP AND an installed native Origami
+# (liborigami + its CMake package) to be present on your system. ROCm cannot be
+# installed via pip and must be installed separately.
 # See: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
-# Ensure CMAKE_PREFIX_PATH includes ROCm (default: /opt/rocm)
+# By default (ORIGAMI_BUILD_FROM_SOURCE=OFF) the extension is built against the
+# installed liborigami via find_package(origami); set CMAKE_PREFIX_PATH so both
+# ROCm (default: /opt/rocm) and the Origami install prefix are discoverable.
+# To build the native library from the in-tree source instead, pass
+# -DORIGAMI_BUILD_FROM_SOURCE=ON.
 
 [project]
 name = "rocm-origami"
 dynamic = ["version"]
 description = "Analytical GEMM Solution Selection"
 readme = "../README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Advanced Micro Devices, Inc."}
@@ -38,7 +43,9 @@ wheel.packages = ["src/origami"]
 cmake.version = ">=3.25"
 build.verbose = true
 # CMake source directory - use current directory (python/) which contains CMakeLists.txt
-# The python/CMakeLists.txt will automatically build origami from parent directory
+# By default python/CMakeLists.txt links against an installed origami
+# (find_package); it builds origami from the parent directory only when
+# ORIGAMI_BUILD_FROM_SOURCE=ON.
 cmake.source-dir = "."
 # CMake arguments
 # CMAKE_PREFIX_PATH and CMAKE_CXX_COMPILER should be set via environment variables
