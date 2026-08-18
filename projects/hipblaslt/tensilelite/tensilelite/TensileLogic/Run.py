@@ -34,8 +34,8 @@ import warnings
 from pathlib import Path
 from typing import FrozenSet, List, Dict, NamedTuple, Tuple
 
-from Tensile.Common.GlobalParameters import assignGlobalParameters, defaultSolution
-from Tensile.CustomYamlLoader import load_logic_gfx_arch, archMatch
+from tensilelite.Common.GlobalParameters import assignGlobalParameters, defaultSolution
+from tensilelite.CustomYamlLoader import load_logic_gfx_arch, archMatch
 
 from .ParseArguments import parseArguments, BUNDLED_KNOWN_BUGS
 from .KnownBugs import (
