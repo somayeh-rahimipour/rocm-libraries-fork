@@ -35,10 +35,15 @@ def preload_via_rocm_sdk() -> bool:
     the process, so a co-loaded consumer (hipBLASLt, PyTorch) binds to the same
     object rather than a second, layout-divergent one.
 
-    Returns True only when rocm_sdk drove a successful preload. Returns False
-    when rocm_sdk is absent or its initialization failed, so the caller falls
-    through to the non-wheel resolution path instead of assuming the runtime is
-    ready.
+    Returns True when rocm_sdk drove the preload. Returns False only when
+    rocm_sdk is absent, so the caller falls through to the non-wheel resolution
+    path. A rocm_sdk that is present but fails to initialize is a hard error, not
+    a fallback trigger: rocm_sdk preloads the requested shortnames incrementally
+    and RTLD_GLOBAL, so a failure partway through can leave SDK copies of the
+    core runtime already mapped. Falling back to the system loader for the
+    remaining library would then bind a second, out-of-tree ``liborigami`` on top
+    of SDK core libraries -- the mixed-installation outcome this preload exists to
+    prevent. The failure is surfaced with context instead.
     """
     try:
         import rocm_sdk
@@ -46,8 +51,14 @@ def preload_via_rocm_sdk() -> bool:
         return False
     try:
         rocm_sdk.initialize_process(preload_shortnames=_ROCM_WHEEL_SHORTNAMES)
-    except Exception:
-        return False
+    except Exception as e:
+        raise RuntimeError(
+            "rocm_sdk is installed but failed to preload the ROCm runtime "
+            "libraries the origami extension depends on "
+            f"({', '.join(_ROCM_WHEEL_SHORTNAMES)}). Falling back to the system "
+            "loader here could mix ROCm installations, so the failure is raised "
+            f"rather than masked.\nOriginal error: {e}"
+        ) from e
     return True
 
 
@@ -85,10 +96,10 @@ def prepare_runtime() -> None:
     """Make the extension's ROCm dependencies resolvable before it is imported.
 
     Prefer the rocm_sdk preload (the wheel-install path). If rocm_sdk is absent,
-    or is present but its preload failed, fall through to the ``ROCM_PATH``
-    directory registration (the non-wheel path) as a best effort. Any dependency
-    still missing after this surfaces as an actionable ``ImportError`` from the
-    extension import itself.
+    fall through to the ``ROCM_PATH`` directory registration (the non-wheel path)
+    as a best effort; a present rocm_sdk that fails to preload raises rather than
+    falling through. Any dependency still missing after this surfaces as an
+    actionable ``ImportError`` from the extension import itself.
     """
     if not preload_via_rocm_sdk():
         register_rocm_path_dir()
