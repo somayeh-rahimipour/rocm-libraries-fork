@@ -987,6 +987,18 @@ class Solution(collections.abc.Mapping):
     isgfx1250 = isa[:2] == (12, 5)
     state["UseSubtileImpl"] = state["UseSubtileImpl"] and (isgfx950 or isgfx1250)
 
+    # gfx1250 TDMInst=3 without the subtile implementation requires
+    # 1LDSBuffer=0 and ScheduleIterAlg in [0, 4]; reject anything else.
+    if state.get("TDMInst", 0) == 3 and isgfx1250 and not state["UseSubtileImpl"]:
+        if state["1LDSBuffer"] != 0:
+            reject(state, printRejectionReason,
+                   "gfx1250 TDMInst=3 requires 1LDSBuffer=0, got %d"
+                   % state["1LDSBuffer"])
+        if state["ScheduleIterAlg"] not in (0, 4):
+            reject(state, printRejectionReason,
+                   "gfx1250 TDMInst=3 requires ScheduleIterAlg in [0, 4], got %d"
+                   % state["ScheduleIterAlg"])
+
     if isgfx950 and (state["ProblemType"]["MXBlockA"] or state["ProblemType"]["MXBlockB"]) and not state["UseSubtileImpl"]:
         reject(state, printRejectionReason, "gfx950 MX requires UseSubtileImpl")
 
