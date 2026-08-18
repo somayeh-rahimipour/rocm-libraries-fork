@@ -215,9 +215,14 @@ namespace TensileLite
                 m_useDeepseekScaleA = args["use-deepseek-scale-a"].as<bool>();
             if(args.count("use-deepseek-scale-b"))
                 m_useDeepseekScaleB = args["use-deepseek-scale-b"].as<bool>();
-            if(args.count("deepseek-scale-block-k"))
-                m_deepseekScaleBlockK
-                    = static_cast<int>(args["deepseek-scale-block-k"].as<size_t>());
+            if(args.count("deepseek-scale-aq0"))
+                m_deepseekScaleAq0 = static_cast<int>(args["deepseek-scale-aq0"].as<size_t>());
+            if(args.count("deepseek-scale-aq1"))
+                m_deepseekScaleAq1 = static_cast<int>(args["deepseek-scale-aq1"].as<size_t>());
+            if(args.count("deepseek-scale-bq0"))
+                m_deepseekScaleBq0 = static_cast<int>(args["deepseek-scale-bq0"].as<size_t>());
+            if(args.count("deepseek-scale-bq1"))
+                m_deepseekScaleBq1 = static_cast<int>(args["deepseek-scale-bq1"].as<size_t>());
 
             if(args.count("bias-type-args"))
                 m_biasTypeArgs = args["bias-type-args"].as<std::vector<rocisa::DataType>>();
@@ -431,6 +436,10 @@ namespace TensileLite
                                 rv.back().setDquantType(m_dquantType);
                                 rv.back().setUseDeepseekScaleA(m_useDeepseekScaleA);
                                 rv.back().setUseDeepseekScaleB(m_useDeepseekScaleB);
+                                rv.back().setDeepseekScaleAq0(m_deepseekScaleAq0);
+                                rv.back().setDeepseekScaleAq1(m_deepseekScaleAq1);
+                                rv.back().setDeepseekScaleBq0(m_deepseekScaleBq0);
+                                rv.back().setDeepseekScaleBq1(m_deepseekScaleBq1);
                                 rv.back().setUsePartialRMS(m_usePartialRMS);
                                 rv.back().setPartialRMSResidualAdd(m_partialRMSResidualAdd);
                                 rv.back().setKernelLanguage(m_kernelLanguage);
@@ -538,15 +547,25 @@ namespace TensileLite
                                 }
                                 if(m_useDeepseekScaleA)
                                 {
-                                    size_t M = rv.back().d().sizes()[0];
-                                    rv.back().setScaleADeepseek(M);
+                                    size_t M    = rv.back().d().sizes()[0];
+                                    size_t K    = rv.back().a().sizes()[1];
+                                    int    aq1  = m_deepseekScaleAq1 > 0 ? m_deepseekScaleAq1 : 128;
+                                    // Device buffer: [ceil(M/64), nKBlocks, 64] fp32.
+                                    // 64 = WavefrontSize; each slot broadcasts one value per lane.
+                                    size_t nRowGroups = (M + 63) / 64;
+                                    size_t nKBlocks   = (K + aq1 - 1) / aq1;
+                                    rv.back().setScaleADeepseek(nRowGroups * nKBlocks * 64);
                                 }
                                 if(m_useDeepseekScaleB)
                                 {
-                                    size_t N       = rv.back().d().sizes()[1];
-                                    int    blockK  = m_deepseekScaleBlockK > 0 ? m_deepseekScaleBlockK : 128;
-                                    size_t nBlocks = (N + blockK - 1) / blockK;
-                                    rv.back().setScaleBDeepseek(nBlocks);
+                                    size_t K    = rv.back().a().sizes()[1];
+                                    size_t N    = rv.back().d().sizes()[1];
+                                    int    aq1  = m_deepseekScaleAq1 > 0 ? m_deepseekScaleAq1 : 128;
+                                    int    bq1  = m_deepseekScaleBq1 > 0 ? m_deepseekScaleBq1 : 128;
+                                    // Device buffer: [nNBlocks, nKBlocks, 64] fp32.
+                                    size_t nNBlocks = (N + bq1 - 1) / bq1;
+                                    size_t nKBlocks = (K + aq1 - 1) / aq1;
+                                    rv.back().setScaleBDeepseek(nNBlocks * nKBlocks * 64);
                                 }
                                 if(j < m_activationEnumArg.size())
                                 {

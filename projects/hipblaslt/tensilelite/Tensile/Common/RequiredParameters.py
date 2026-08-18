@@ -174,5 +174,8 @@ def getRequiredParametersMin() -> set:
         'DQuantSize1',
         'UseDeepseekScaleA',
         'UseDeepseekScaleB',
-        'DeepseekScaleBlockK',
+        'DeepseekScaleAq0',
+        'DeepseekScaleAq1',
+        'DeepseekScaleBq0',
+        'DeepseekScaleBq1',
     })

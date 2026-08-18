@@ -51,16 +51,6 @@ namespace TensileLite
     namespace
     {
 
-        // Decode an E8M0 scale byte to fp32 exactly as the GPU does (bits = byte << 23).
-        // Byte 0x00 yields 0.0f and 0xFF yields +inf, matching the kernel's decode.
-        inline float decodeE8M0(uint8_t e8m0)
-        {
-            uint32_t bits = static_cast<uint32_t>(e8m0) << 23;
-            float    f;
-            std::memcpy(&f, &bits, sizeof(f));
-            return f;
-        }
-
         // Helper to load data from various source types into an AccumT buffer.
         // Sub-float types go through float first since they lack operator AccumT().
         template <typename AccumT, typename SrcType>
@@ -2143,23 +2133,26 @@ namespace TensileLite
                         alpha *= scaleB;
                 }
 
-                // Deepseek per-row A scale: D[m,n] = alpha * scaleA[m] * scaleB[n/blockK] * acc.
-                // Scale buffers hold one E8M0 byte per element; decode as the GPU does.
+                // Deepseek fp32 scale: scale buffers hold fp32 in a DTL broadcast layout.
+                // Each wave group of 64 rows reads one fp32 per K-block, replicated 64 times.
+                // The reference indexes by the wave-group representative row (m rounded to 64).
                 if(problem.useDeepseekScaleA() && inputs.scaleADeepseek != nullptr)
                 {
-                    size_t  mCoord   = dCoord[0];
-                    uint8_t e8m0     = static_cast<const uint8_t*>(inputs.scaleADeepseek)[mCoord];
-                    value *= static_cast<Accumulator>(decodeE8M0(e8m0));
+                    size_t mCoord   = dCoord[0];
+                    // Per-wave-group index: each group of 64 rows shares the same fp32 value.
+                    // Device layout: [nRowGroups, nKBlocks, 64] fp32; use lane 0 of K-block 0.
+                    size_t waveGroup = mCoord / 64;
+                    value *= static_cast<Accumulator>(
+                        static_cast<const float*>(inputs.scaleADeepseek)[waveGroup * 64]);
                 }
                 if(problem.useDeepseekScaleB() && inputs.scaleBDeepseek != nullptr)
                 {
-                    size_t  nCoord   = dCoord[1];
-                    // DeepseekScaleBlockK is fixed at 128 (the only value in ValidParameters).
-                    // If the valid set is extended, add a blockK field to ContractionProblemGemm
-                    // and read it here instead of this constant.
-                    constexpr size_t blockK = 128;
-                    uint8_t e8m0     = static_cast<const uint8_t*>(inputs.scaleBDeepseek)[nCoord / blockK];
-                    value *= static_cast<Accumulator>(decodeE8M0(e8m0));
+                    size_t nCoord  = dCoord[1];
+                    int    bq1     = problem.deepseekScaleBq1();
+                    // Device layout: [nNBlocks, nKBlocks, 64] fp32; use lane 0 of K-block 0.
+                    size_t nBlock  = nCoord / static_cast<size_t>(bq1);
+                    value *= static_cast<Accumulator>(
+                        static_cast<const float*>(inputs.scaleBDeepseek)[nBlock * 64]);
                 }
 
                 auto resultD = multiply<Accumulator>(alpha, value);

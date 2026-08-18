@@ -540,7 +540,10 @@ validParameters = { # we need to make sure this matches develop
     "DQuantSize1": -1,  # Scalar; -1/0 = whole MacroTile1. Real validation in _resolveDQuantSize.
     "UseDeepseekScaleA": [False, True],
     "UseDeepseekScaleB": [False, True],
-    "DeepseekScaleBlockK": [128],
+    "DeepseekScaleAq0": list(range(1, 1025)),
+    "DeepseekScaleAq1": list(range(1, 1025)),
+    "DeepseekScaleBq0": list(range(1, 1025)),
+    "DeepseekScaleBq1": list(range(1, 1025)),
     "UseSubtileImpl": [False, True],
     # Load options:
     # (GRO = Global Read Offset)

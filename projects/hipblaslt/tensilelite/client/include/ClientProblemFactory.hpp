@@ -93,7 +93,10 @@ namespace TensileLite
             int         m_partialRMSMT1Override  = 0;
             bool        m_useDeepseekScaleA      = false;
             bool        m_useDeepseekScaleB      = false;
-            int         m_deepseekScaleBlockK    = 128;
+            int         m_deepseekScaleAq0       = 128;
+            int         m_deepseekScaleAq1       = 128;
+            int         m_deepseekScaleBq0       = 1;
+            int         m_deepseekScaleBq1       = 128;
 
             int                              m_sparse;
             KernelLanguage                   m_kernelLanguage;

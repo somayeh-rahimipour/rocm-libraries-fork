@@ -74,7 +74,8 @@ class ProblemType:
                  'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
                  'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat',
                  'usePartialRMS', 'partialRMSResidualAdd', 'partialRMSQuant',
-                 'dquantType', 'useDeepseekScaleA', 'useDeepseekScaleB']
+                 'dquantType', 'useDeepseekScaleA', 'useDeepseekScaleB',
+                 'deepseekScaleAq0', 'deepseekScaleAq1', 'deepseekScaleBq0', 'deepseekScaleBq1']
     @classmethod
     def FromOriginalState(cls, d):
         indices = [None]*d['TotalIndices']
@@ -266,6 +267,10 @@ class ProblemType:
         rv.dquantType = str(d.get('DQuantType', 'None'))
         rv.useDeepseekScaleA = bool(d.get('UseDeepseekScaleA', False))
         rv.useDeepseekScaleB = bool(d.get('UseDeepseekScaleB', False))
+        rv.deepseekScaleAq0 = int(d.get('DeepseekScaleAq0', 128))
+        rv.deepseekScaleAq1 = int(d.get('DeepseekScaleAq1', 128))
+        rv.deepseekScaleBq0 = int(d.get('DeepseekScaleBq0', 1))
+        rv.deepseekScaleBq1 = int(d.get('DeepseekScaleBq1', 128))
 
         rv.useScaleAB = ""
         if 'UseScaleAB' in d:
@@ -446,6 +451,11 @@ class ProblemType:
             predicates.append(ProblemPredicate("DQuantType", value=self.dquantType))
             predicates.append(ProblemPredicate("UseDeepseekScaleA", value=self.useDeepseekScaleA))
             predicates.append(ProblemPredicate("UseDeepseekScaleB", value=self.useDeepseekScaleB))
+            if self.useDeepseekScaleA or self.useDeepseekScaleB:
+                predicates.append(ProblemPredicate("DeepseekScaleAq0", value=self.deepseekScaleAq0))
+                predicates.append(ProblemPredicate("DeepseekScaleAq1", value=self.deepseekScaleAq1))
+                predicates.append(ProblemPredicate("DeepseekScaleBq0", value=self.deepseekScaleBq0))
+                predicates.append(ProblemPredicate("DeepseekScaleBq1", value=self.deepseekScaleBq1))
         return predicates
 
 def extractDimPredicate(cls, key, value, predicateName):

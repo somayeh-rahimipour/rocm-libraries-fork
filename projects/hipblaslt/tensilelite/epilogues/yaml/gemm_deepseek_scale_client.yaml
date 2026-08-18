@@ -40,6 +40,10 @@ BenchmarkProblems:
       Sparse: 0
       UseDeepseekScaleA: True
       UseDeepseekScaleB: False
+      DeepseekScaleAq0: 128
+      DeepseekScaleAq1: 128
+      DeepseekScaleBq0: 1
+      DeepseekScaleBq1: 128
 
     - BenchmarkCommonParameters:
         - KernelLanguage: ["Assembly"]
@@ -48,7 +52,10 @@ BenchmarkProblems:
             - [16, 16, 128, 1, 1, 4, 8, 1, 1]
         - UseDeepseekScaleA: [True]
         - UseDeepseekScaleB: [False]
-        - DeepseekScaleBlockK: [128]
+        - DeepseekScaleAq0: [128]
+        - DeepseekScaleAq1: [128]
+        - DeepseekScaleBq0: [1]
+        - DeepseekScaleBq1: [128]
         - StreamK: [3]
         - StreamKForceDPOnly: [1]
         - StreamKAtomic: [0]
@@ -95,6 +102,10 @@ BenchmarkProblems:
       Sparse: 0
       UseDeepseekScaleA: False
       UseDeepseekScaleB: True
+      DeepseekScaleAq0: 128
+      DeepseekScaleAq1: 128
+      DeepseekScaleBq0: 1
+      DeepseekScaleBq1: 128
 
     - BenchmarkCommonParameters:
         - KernelLanguage: ["Assembly"]
@@ -103,7 +114,10 @@ BenchmarkProblems:
             - [16, 16, 128, 1, 1, 4, 8, 1, 1]
         - UseDeepseekScaleA: [False]
         - UseDeepseekScaleB: [True]
-        - DeepseekScaleBlockK: [128]
+        - DeepseekScaleAq0: [128]
+        - DeepseekScaleAq1: [128]
+        - DeepseekScaleBq0: [1]
+        - DeepseekScaleBq1: [128]
         - StreamK: [3]
         - StreamKForceDPOnly: [1]
         - StreamKAtomic: [0]
@@ -150,6 +164,10 @@ BenchmarkProblems:
       Sparse: 0
       UseDeepseekScaleA: True
       UseDeepseekScaleB: True
+      DeepseekScaleAq0: 128
+      DeepseekScaleAq1: 128
+      DeepseekScaleBq0: 1
+      DeepseekScaleBq1: 128
 
     - BenchmarkCommonParameters:
         - KernelLanguage: ["Assembly"]
@@ -158,7 +176,10 @@ BenchmarkProblems:
             - [16, 16, 128, 1, 1, 4, 8, 1, 1]
         - UseDeepseekScaleA: [True]
         - UseDeepseekScaleB: [True]
-        - DeepseekScaleBlockK: [128]
+        - DeepseekScaleAq0: [128]
+        - DeepseekScaleAq1: [128]
+        - DeepseekScaleBq0: [1]
+        - DeepseekScaleBq1: [128]
         - StreamK: [3]
         - StreamKForceDPOnly: [1]
         - StreamKAtomic: [0]

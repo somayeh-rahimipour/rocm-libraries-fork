@@ -840,18 +840,32 @@ namespace TensileLite
         void setUseDeepseekScaleB(bool v) { m_useDeepseekScaleB = v; }
         bool useDeepseekScaleB() const     { return m_useDeepseekScaleB; }
 
-        void setScaleADeepseek(size_t mRows)
+        void setDeepseekScaleAq0(int v) { m_deepseekScaleAq0 = v; }
+        int  deepseekScaleAq0() const   { return m_deepseekScaleAq0; }
+
+        void setDeepseekScaleAq1(int v) { m_deepseekScaleAq1 = v; }
+        int  deepseekScaleAq1() const   { return m_deepseekScaleAq1; }
+
+        void setDeepseekScaleBq0(int v) { m_deepseekScaleBq0 = v; }
+        int  deepseekScaleBq0() const   { return m_deepseekScaleBq0; }
+
+        void setDeepseekScaleBq1(int v) { m_deepseekScaleBq1 = v; }
+        int  deepseekScaleBq1() const   { return m_deepseekScaleBq1; }
+
+        // flatSize = nRowGroups * nKBlocks * 64 fp32 elements (DTL broadcast layout).
+        void setScaleADeepseek(size_t flatSize)
         {
             if(m_useDeepseekScaleA)
                 m_tensors[TENSOR::SCALEA_DS]
-                    = {"scaleADeepseek", rocisa::DataType::Int8, {mRows}, {1}};
+                    = {"scaleADeepseek", rocisa::DataType::Float, {flatSize}, {1}};
         }
 
-        void setScaleBDeepseek(size_t nBlocks)
+        // flatSize = nNBlocks * nKBlocks * 64 fp32 elements (DTL broadcast layout).
+        void setScaleBDeepseek(size_t flatSize)
         {
             if(m_useDeepseekScaleB)
                 m_tensors[TENSOR::SCALEB_DS]
-                    = {"scaleBDeepseek", rocisa::DataType::Int8, {nBlocks}, {1}};
+                    = {"scaleBDeepseek", rocisa::DataType::Float, {flatSize}, {1}};
         }
 
         void setUseBias(int useBias)
@@ -1605,6 +1619,10 @@ namespace TensileLite
         int              m_dquantSize1             = 0;
         bool             m_useDeepseekScaleA       = false;
         bool             m_useDeepseekScaleB       = false;
+        int              m_deepseekScaleAq0        = 128;
+        int              m_deepseekScaleAq1        = 128;
+        int              m_deepseekScaleBq0        = 1;
+        int              m_deepseekScaleBq1        = 128;
         bool             m_swizzleTensorA          = false;
         bool             m_swizzleTensorB          = false;
         int              m_useBias                 = 0;

@@ -1414,10 +1414,8 @@ namespace TensileLite
                     if(!m_problemDependentData)
                     {
 
-                        if(it.name == "scaleADeepseek" || it.name == "scaleBDeepseek")
-                            initE8M0Array(pUnit.cpuInput.valid.get(), pUnit.maxElements);
-                        else
-                            initArray(p.first, it.init, pUnit.cpuInput.valid.get(), pUnit.maxElements);
+                        // scaleADeepseek/scaleBDeepseek are fp32; use the normal initArray path.
+                        initArray(p.first, it.init, pUnit.cpuInput.valid.get(), pUnit.maxElements);
                         HIP_CHECK_EXC(
                             hipMemcpy(pUnit.gpuInput.valid.get(),
                                       pUnit.cpuInput.valid.get(),

@@ -10,6 +10,7 @@ instructions by dispatching each opType to its emit method.
 from __future__ import annotations
 
 from Tensile.Components.Subtile.Kernel import emitMfmaInstruction
+from Tensile.Components.Subtile.InstructionScheduler import MFMAGroupModule
 from Tensile.Components.Subtile.SubtileGREmit import (
     emitSingleBufferLoad, globalReadPtrUpdates, globalReadLDSBufferSwap,
 )
@@ -22,11 +23,13 @@ from Tensile.Components.Subtile.SubtileScaleEmit import (
 from rocisa.code import Module
 from rocisa.instruction import (
     SWaitCnt, SBarrier, DSLoadB32, SCmpEQU32, SCmpLeU32,
-    SCBranchSCC1, SMovB32, VAddU32, VAndB32, VCmpGEI32, VCmpGTI32, VCmpLeI32,
-    VCmpLtI32, VCndMaskB32, VLShiftLeftB32, VLShiftRightB32, VMovB32, VSubI32,
+    SCBranchSCC1, SMovB32, SNop, VAccvgprReadB32, VAccvgprWriteB32,
+    VAddF32, VAddU32, VAndB32, VCmpGEI32, VCmpGTI32, VCmpLeI32,
+    VCmpLtI32, VCndMaskB32, VLShiftLeftB32, VLShiftRightB32, VMovB32,
+    VMulF32, VSubI32,
 )
 from rocisa.instruction import SWaitTensorcnt
-from rocisa.container import vgpr, sgpr, DSModifiers, ContinuousRegister
+from rocisa.container import accvgpr, vgpr, sgpr, DSModifiers, ContinuousRegister
 from rocisa.code import Label
 
 
@@ -152,7 +155,6 @@ class InstructionEmitter:
 
     def emit_mfma(self, placement, unroll_iter=0):
         """Emit MFMA instructions from MFMAPlacement."""
-        module = Module()
         subIterK = placement.subIterK
         tile_maps = {t: placement.vgpr_tile_maps[t][unroll_iter]
                      for t in placement.vgpr_tile_maps}
@@ -173,6 +175,10 @@ class InstructionEmitter:
         else:
             abPairs = [(a, b) for a in aTiles for b in bTiles]
 
+        if isDeepseekScale(self.kernel):
+            return self._emit_mfma_deepseek(subIterK, tile_maps, abPairs)
+
+        module = Module()
         for a, b in abPairs:
             groupA = (a // self.config.lrA.mn) * self.config.lrA.mn
             groupB = (b // self.config.lrB.mn) * self.config.lrB.mn
@@ -201,10 +207,6 @@ class InstructionEmitter:
                 else:
                     scaleBVgpr = -1
                     sBsel = 0
-                # DeepseekScale broadcasts each E8M0 byte to all 4 bytes of the b32
-                # VGPR, so the correct selector is always 0 for both sides.
-                if isDeepseekScale(self.kernel):
-                    sAsel = sBsel = 0
             else:
                 scaleAVgpr = scaleBVgpr = -1
                 sAsel = sBsel = 0
@@ -215,6 +217,84 @@ class InstructionEmitter:
                 scaleAsel=sAsel, scaleBsel=sBsel,
                 comment=f"MFMA C[{a},{b}] += A[{a},K={subIterK}] * B[{b},K={subIterK}]"))
         return list(module.flatitems())
+
+    def _emit_mfma_deepseek(self, subIterK, tile_maps, abPairs):
+        """Emit DeepseekScale MFMA tiles as MFMAGroupModule objects.
+
+        Each MFMAGroupModule holds one MXMFMA (A*B into partialTile) followed
+        by per-output-element fold code that scales and accumulates into dTile.
+        Returning MFMAGroupModule objects (rather than flat instructions) lets
+        the instruction scheduler treat each group as a single MFMA while still
+        serializing the complete MFMA + fold sequence.
+        """
+        partialTile = self.kernel["_dsFp32PartialTile"]
+        zeroTile = self.kernel["_dsFp32ZeroTile"]
+        factorBase = self.kernel["_dsFp32FactorVgprBase"]
+        f0 = factorBase
+        f1 = factorBase + 1
+
+        groups = []
+        for a, b in abPairs:
+            groupA = (a // self.config.lrA.mn) * self.config.lrA.mn
+            groupB = (b // self.config.lrB.mn) * self.config.lrB.mn
+            aTile = self.vgprTilesA[tile_maps['A'][groupA]]
+            bTile = self.vgprTilesB[tile_maps['B'][groupB]]
+            dTile = self.dtileInfo.vgprTiles[a + b * self.dtileInfo.localMMATileGrid[0]]
+
+            scaleAVgpr = scaleBVgpr = -1
+            if self.hasScaleA:
+                scaleGroupA = (a // self.config.lrSA.mn) * self.config.lrSA.mn
+                scaleATile = self.vgprTilesSA[tile_maps['SA'][scaleGroupA]]
+                scaleAVgpr = next(iter(scaleATile))
+            if self.hasScaleB:
+                scaleGroupB = (b // self.config.lrSB.mn) * self.config.lrSB.mn
+                scaleBTile = self.vgprTilesSB[tile_maps['SB'][scaleGroupB]]
+                scaleBVgpr = next(iter(scaleBTile))
+
+            group = MFMAGroupModule(f"ds_tile_{a}_{b}_k{subIterK}")
+            # MXMFMA with unit E8M0 scale: partialTile = A * B (C = zeroTile).
+            group.add(emitMfmaInstruction(
+                self.writer, self.kernel, aTile, bTile, zeroTile, partialTile,
+                scaleAVgpr=-1, scaleBVgpr=-1, scaleAsel=-1, scaleBsel=-1,
+                comment=(f"DS fp32: partial[{a},{b}]"
+                         f" = A[{a},K={subIterK}] * B[{b},K={subIterK}]")))
+            # CDNA4 ISA 7.6: the fold reads the partial MFMA's accumulator via
+            # v_accvgpr_read; the 16x16x128 f8 MFMA D result is not retired at
+            # zero separation, so the first output element would read a stale
+            # accumulator (corrupting rows congruent to 0 mod 4). Stall until the
+            # MFMA retires. s_nop 12 => 13 quad-cycles, above the measured ~11
+            # quad-cycle threshold for this instruction.
+            group.add(SNop(waitState=12,
+                           comment="DS fp32: wait for partial MFMA to retire before acc read."))
+            # Fold: for each output element r, master[r] += scaleA * scaleB * partial[r].
+            numAccVgpr = len(dTile.regList.indices)
+            for r in range(numAccVgpr):
+                group.add(VAccvgprReadB32(
+                    vgpr(f0), accvgpr(partialTile.regList.indices[r]),
+                    comment=f"DS fp32: f0 = partial[{r}]"))
+                group.add(SNop(waitState=1,
+                               comment="s_nop after v_accvgpr_read before VALU."))
+                if self.hasScaleA:
+                    group.add(VMulF32(
+                        dst=vgpr(f0), src0=vgpr(f0), src1=vgpr(scaleAVgpr),
+                        comment="DS fp32: f0 *= scaleA"))
+                if self.hasScaleB:
+                    group.add(VMulF32(
+                        dst=vgpr(f0), src0=vgpr(f0), src1=vgpr(scaleBVgpr),
+                        comment="DS fp32: f0 *= scaleB"))
+                group.add(VAccvgprReadB32(
+                    vgpr(f1), accvgpr(dTile.regList.indices[r]),
+                    comment=f"DS fp32: f1 = master[{r}]"))
+                group.add(SNop(waitState=1,
+                               comment="s_nop after v_accvgpr_read before VALU."))
+                group.add(VAddF32(
+                    dst=vgpr(f1), src0=vgpr(f1), src1=vgpr(f0),
+                    comment=f"DS fp32: master[{r}] += scale*partial[{r}]"))
+                group.add(VAccvgprWriteB32(
+                    accvgpr(dTile.regList.indices[r]), vgpr(f1),
+                    comment=f"DS fp32: write master[{r}]"))
+            groups.append(group)
+        return groups
 
     def emit_lr(self, placement, unroll_iter=0):
         """Emit LR (ds_read) instructions from LRPlacement."""
@@ -308,8 +388,8 @@ class InstructionEmitter:
         # TODO. Hardcoded for now, but we should just get this from atomic emit codes (emitSingleBufferLoad, ...)
         grMap = {'A': max(1,int(1.0/self.tileInfoA.loadRatioGR)),
                  'B':  max(1,int(1.0/self.tileInfoB.loadRatioGR)),
-                 'SA': 1, 
-                 'SB': 1}  
+                 'SA': 1,
+                 'SB': 1}
         if force_drain:
             grCnt = 0
             label = "full drain"

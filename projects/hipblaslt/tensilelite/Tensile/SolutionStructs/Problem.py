@@ -431,6 +431,10 @@ _defaultProblemType = {
     "DQuantType":            "None",
     "UseDeepseekScaleA":     False,
     "UseDeepseekScaleB":     False,
+    "DeepseekScaleAq0":      128,  # M-dimension quantization block size for scaleA
+    "DeepseekScaleAq1":      128,  # K-dimension quantization block size for scaleA
+    "DeepseekScaleBq0":      1,    # K-dimension quantization block size for scaleB (in DepthU units)
+    "DeepseekScaleBq1":      128,  # N-dimension quantization block size for scaleB
     "Gradient": False,  # =True set globalWriteElements to gradient mode
     "UseBias": 0,  # =1 support bias vector on M direction, =2 support bias vector on N direction, =3 support bias vector on both M,N direction
     "UseGateResidual": False,  # =True apply gate residual: D = gate * spmm_result + gate

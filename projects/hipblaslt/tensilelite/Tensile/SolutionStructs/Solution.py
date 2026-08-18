@@ -586,7 +586,7 @@ def _validateDeepseekScaleEpilogueModifiers(state, printRejectionReason):
 
 
 def _validateDeepseekScaleDepthU(state, printRejectionReason):
-  """Reject DepthU/DeepseekScaleBlockK geometry mismatches. Returns True on reject."""
+  """Reject DepthU / quantization tile size geometry mismatches. Returns True on reject."""
   # fp8 MFMA instruction spans 128 K-elements (instK=128): DepthU must be a
   # non-zero multiple of 128 so the subtile geometry has a valid K-grid.
   abPairA = state.get("_ABTilePairA", "")
@@ -596,11 +596,11 @@ def _validateDeepseekScaleDepthU(state, printRejectionReason):
            f"useDeepseekScale with fp8 A requires DepthU to be a positive multiple "
            f"of 128 (got DepthU={depthU})")
     return True
-  blockK = state.get("DeepseekScaleBlockK", 128)
-  if depthU != blockK:
+  aq1 = state.get("DeepseekScaleAq1", 128)
+  if depthU != aq1:
     reject(state, printRejectionReason,
-           f"useDeepseekScaleA/B requires DepthU == DeepseekScaleBlockK "
-           f"(got DepthU={depthU}, blockK={blockK})")
+           f"useDeepseekScaleA/B requires DepthU == DeepseekScaleAq1 "
+           f"(got DepthU={depthU}, Aq1={aq1})")
     return True
   return False
 
@@ -663,6 +663,21 @@ def _validateDeepseekScale(state, printRejectionReason):
     reject(state, printRejectionReason,
            "useDeepseekScale supports only PrefetchGlobalRead=0, 1, or 2 (mainloop scale path)")
     return
+  # fp32 software rescale needs 8 AGPRs (partialTile[4] + zeroTile[4]) on top of
+  # the D accumulators. gfx950 has 256 accgpr; reject configs whose D footprint
+  # leaves no room (e.g. MT64x256 wg[1,1]: 64 tiles x 4 = 256 AGPRs, overflow).
+  mim = state.get("MatrixInstM", 0)
+  wg = state.get("MIWaveGroup", [1, 1])
+  mt0 = state.get("MacroTile0", 0)
+  mt1 = state.get("MacroTile1", 0)
+  if mim and wg[0] and wg[1]:
+    numDTiles = (mt0 // (mim * wg[0])) * (mt1 // (mim * wg[1]))
+    accForD = numDTiles * 4  # f32 16x16 output: 4 accgpr per lane per tile.
+    if accForD + 8 > 256:
+      reject(state, printRejectionReason,
+             f"useDeepseekScale fp32 rescale needs 8 AGPRs beyond the {accForD} "
+             f"D accumulators; {accForD}+8 exceeds the 256 accgpr budget")
+      return
   _validateDeepseekScaleMultiK(state, printRejectionReason)
 
 

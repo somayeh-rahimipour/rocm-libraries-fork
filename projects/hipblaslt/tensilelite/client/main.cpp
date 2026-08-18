@@ -416,9 +416,12 @@ namespace TensileLite
                 ("init-quantScale",           po::value<InitMode>()->default_value(InitMode::Zero), "Init mode for quantScale output.")
                 ("dquant-size-0",             po::value<size_t>()->default_value(0),               "Dynamic-quant tile M extent (0 = whole MacroTile0).")
                 ("dquant-size-1",             po::value<size_t>()->default_value(0),               "Dynamic-quant tile N extent (0 = whole MacroTile1).")
-                ("use-deepseek-scale-a",      po::value<bool>()->default_value(false), "Enable Deepseek per-row A dequantization scale epilogue.")
-                ("use-deepseek-scale-b",      po::value<bool>()->default_value(false), "Enable Deepseek per-128col B dequantization scale epilogue.")
-                ("deepseek-scale-block-k",    po::value<size_t>()->default_value(128), "Column-block width for Deepseek B scale (default 128).")
+                ("use-deepseek-scale-a",      po::value<bool>()->default_value(false), "Enable Deepseek fp32 A scale epilogue.")
+                ("use-deepseek-scale-b",      po::value<bool>()->default_value(false), "Enable Deepseek fp32 B scale epilogue.")
+                ("deepseek-scale-aq0",        po::value<size_t>()->default_value(128), "M-dim quantization block size for scaleA (default 128).")
+                ("deepseek-scale-aq1",        po::value<size_t>()->default_value(128), "K-dim quantization block size for scaleA (default 128).")
+                ("deepseek-scale-bq0",        po::value<size_t>()->default_value(1),   "K-dim quantization block size for scaleB in DepthU units (default 1).")
+                ("deepseek-scale-bq1",        po::value<size_t>()->default_value(128), "N-dim quantization block size for scaleB (default 128).")
                 ("init-scaleADeepseek",       po::value<InitMode>()->default_value(InitMode::TrigAbsSin), "Init mode for Deepseek A scale buffer.")
                 ("init-scaleBDeepseek",       po::value<InitMode>()->default_value(InitMode::TrigAbsSin), "Init mode for Deepseek B scale buffer.")
                 ("use-partial-rms",           po::value<bool>()->default_value(false), "Enable PartialRMS fused epilogue.")
@@ -579,7 +582,10 @@ namespace TensileLite
             DUMP_OPT("dquant-size-1", size_t);
             DUMP_OPT("use-deepseek-scale-a", bool);
             DUMP_OPT("use-deepseek-scale-b", bool);
-            DUMP_OPT("deepseek-scale-block-k", size_t);
+            DUMP_OPT("deepseek-scale-aq0", size_t);
+            DUMP_OPT("deepseek-scale-aq1", size_t);
+            DUMP_OPT("deepseek-scale-bq0", size_t);
+            DUMP_OPT("deepseek-scale-bq1", size_t);
             DUMP_OPT("init-scaleADeepseek", InitMode);
             DUMP_OPT("init-scaleBDeepseek", InitMode);
             DUMP_OPT("use-partial-rms", bool);

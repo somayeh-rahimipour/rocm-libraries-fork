@@ -1,33 +1,25 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
-"""Pytest suite for the fused GEMM+DeepseekScale Subtile mainloop scale path (PGR=0/1/2, gfx950, fp8 in / f32 out).
+"""Pytest suite for the fused GEMM+DeepseekScale fp32 software-rescale path (PGR=0/1/2, gfx950, fp8 in / f32 out).
 
 Covers three flag combinations:
-  - A-only: D = alpha * scaleA[m] * (A_fp8 @ B_fp8) + beta*C
-  - B-only: D = alpha * scaleB[n//128] * (A_fp8 @ B_fp8) + beta*C
-  - A+B:    D = alpha * scaleA[m] * scaleB[n//128] * (A_fp8 @ B_fp8) + beta*C
+  - A-only: D = alpha * scaleA[m/Aq0, k/Aq1] * partial[m,n,k] + beta*C
+  - B-only: D = alpha * scaleB[k/Bq0, n/Bq1] * partial[m,n,k] + beta*C
+  - A+B:    D = alpha * scaleA[m/Aq0, k/Aq1] * scaleB[k/Bq0, n/Bq1] * partial[m,n,k] + beta*C
 
+Default tile sizes: Aq0=128, Aq1=128, Bq0=1, Bq1=128.
 Layout: free0=M (rows), free1=N (columns), bound=K.
 A is stored as [K, M] (TransposeA=True), B as [K, N].
-scaleA is E8M0 uint8 [M], one byte per output row.
-scaleB is E8M0 uint8 [ceil(N/128)], one byte per 128-column N-block.
+Scales are fp32 values in a reasonable range (e.g. [0.5, 1.5]).
 
-E8M0 format: value = 2^(byte - 127). Bytes in [120, 135] give values in [2^-7, 2^8],
-keeping the product of scaleA * scaleB * fp8 accumulator in a reasonable fp32 range.
+Device layout for scale buffers (matches the 4-byte DirectToLds load in the kernel):
+  scaleA -- logical fp32 [nRowGroups, nKBlocks], device flat fp32 [nRowGroups, nKBlocks, 64]:
+    R = 64 (lanes per wave; rows per wave group for in-scope configs)
+    nRowGroups = mPadded // R
+    All 64 lane slots in each (rowGroup, kBlock) entry hold the same fp32 value.
 
-N-block note: N=320 is a valid partial-block test (3 blocks of 128: 0-127, 128-255, 256-319).
-  The third scaleB element scales only the 64 columns [256, 320), which is correctly
-  handled by the write-guard in the store path and the numpy reference's [:, :N] slice.
-
-Device layout for scale buffers (matches the b32 DirectToLds load in the kernel):
-  scaleA -- logical uint8 [Mpadded, nKBlocks], device flat uint8 of length nRowGroups*nKBlocks*R*4:
-    R = 64  (MatrixInstM * mma_m = 16 * 4; rows per wave for in-scope configs)
-    rowGroup = m // R;  rowSlot = m % R
-    device[((rowGroup*nKBlocks + kb)*R + rowSlot)*4 + b] = scaleA[m, kb]  for b in 0..3
-
-  scaleB -- logical uint8 [nKBlocks, nNBlocks], device flat uint8 of length nNBlocks*nKBlocks*256:
-    device[(nb*nKBlocks + kb)*256 + j] = scaleB[kb, nb]  for all j in 0..255
-    (all 256 bytes in each (nb, kb) slot hold the same broadcast E8M0 byte)
+  scaleB -- logical fp32 [nKBlocks, nNBlocks], device flat fp32 [nNBlocks, nKBlocks, 64]:
+    All 64 lane slots in each (nBlock, kBlock) entry hold the same fp32 value.
 """
 
 import math
@@ -137,21 +129,6 @@ def numpy_ref_multiblock(A, B, scaleA, scaleB, alpha, beta, C):
 
 
 # ---------------------------------------------------------------------------
-# E8M0 helpers.
-# ---------------------------------------------------------------------------
-
-def _make_e8m0_bytes(shape, rng):
-    """Generate random E8M0 exponent bytes in [120, 135] and decode to fp32.
-
-    Returns (bytes_u8, fp32_values). Bytes in [120, 135] give scale factors
-    2^(-7) to 2^(8), keeping products in a reasonable fp32 range.
-    """
-    exp_bytes = rng.integers(120, 136, size=shape, dtype=np.uint8)
-    fp32_vals = np.ldexp(1.0, exp_bytes.astype(np.int32) - 127).astype(np.float32)
-    return exp_bytes, fp32_vals
-
-
-# ---------------------------------------------------------------------------
 # Device-layout swizzle helpers.
 # ---------------------------------------------------------------------------
 
@@ -159,37 +136,37 @@ def _make_e8m0_bytes(shape, rng):
 _ROWS_PER_WAVE = 64
 
 
-def _swizzleScaleADevice(scaleA_bytes: np.ndarray, nKBlocks: int) -> np.ndarray:
-    """Convert logical scaleA [Mpadded, nKBlocks] uint8 to the device b32-LDS layout.
+def _swizzleScaleADevice(scaleA_padded: np.ndarray, nKBlocks: int) -> np.ndarray:
+    """Convert logical scaleA [mPadded, nKBlocks] fp32 to the device layout.
 
-    Device layout (flat uint8, length nRowGroups*nKBlocks*R*4):
-      device[((rowGroup*nKBlocks + kb)*R + rowSlot)*4 + b] = scaleA[m, kb]
-    where R=64, rowGroup=m//R, rowSlot=m%R, b in 0..3 (broadcast).
+    Device layout (flat fp32, length nRowGroups*nKBlocks*64):
+      device[(rowGroup*nKBlocks + kb)*64 + lane] = scaleA[rowGroup*R, kb]
+    where R=64 and all 64 lane slots hold the same fp32 value.
     """
     R = _ROWS_PER_WAVE
-    mPadded = scaleA_bytes.shape[0]
+    mPadded = scaleA_padded.shape[0]
     assert mPadded % R == 0, f"mPadded ({mPadded}) must be divisible by R ({R})"
     nRowGroups = mPadded // R
-    # Reshape to [nRowGroups, R, nKBlocks], then permute to [nRowGroups, nKBlocks, R].
-    shaped = scaleA_bytes.reshape(nRowGroups, R, nKBlocks).transpose(0, 2, 1)
-    # Broadcast each byte into 4 identical bytes: add axis, tile to length 4.
-    broadcast = np.repeat(shaped[:, :, :, np.newaxis], 4, axis=3)
-    return broadcast.ravel()
+    # Take the representative value for each wave group (all rows in a group are equal).
+    rep = scaleA_padded[::R, :]  # [nRowGroups, nKBlocks]
+    # Broadcast each value to all 64 lane slots.
+    broadcast = np.repeat(rep[:, :, np.newaxis], R, axis=2)  # [nRowGroups, nKBlocks, 64]
+    return broadcast.astype(np.float32).ravel()
 
 
-def _swizzleScaleBDevice(scaleB_bytes: np.ndarray, nKBlocks: int) -> np.ndarray:
-    """Convert logical scaleB [nKBlocks, nNBlocks] uint8 to the device b32-LDS layout.
+def _swizzleScaleBDevice(scaleB_logical: np.ndarray, nKBlocks: int) -> np.ndarray:
+    """Convert logical scaleB [nKBlocks, nNBlocks] fp32 to the device layout.
 
-    Device layout (flat uint8, length nNBlocks*nKBlocks*256):
-      device[(nb*nKBlocks + kb)*256 + j] = scaleB[kb, nb]  for all j in 0..255
-    Each (nb, kb) slot holds 256 identical copies of the E8M0 byte.
+    Device layout (flat fp32, length nNBlocks*nKBlocks*64):
+      device[(nb*nKBlocks + kb)*64 + lane] = scaleB[kb, nb]
+    where all 64 lane slots hold the same fp32 value.
     """
-    nNBlocks = scaleB_bytes.shape[1]
+    nNBlocks = scaleB_logical.shape[1]
     # Transpose to [nNBlocks, nKBlocks] so C-order matches (nb, kb) indexing.
-    transposed = scaleB_bytes.T  # [nNBlocks, nKBlocks]
-    # Broadcast each byte into 256 identical bytes.
-    broadcast = np.repeat(transposed[:, :, np.newaxis], 256, axis=2)
-    return broadcast.ravel()
+    transposed = scaleB_logical.T  # [nNBlocks, nKBlocks]
+    # Broadcast each value to all 64 lane slots.
+    broadcast = np.repeat(transposed[:, :, np.newaxis], 64, axis=2)
+    return broadcast.astype(np.float32).ravel()
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +267,7 @@ _TEST_SHAPES_MULTIK = [
 
 
 def _make_inputs_ab_multik(M, N, K, mPadded):
-    """Generate fp8 A/B and E8M0 scaleA/scaleB for a multi-K-block A+B test."""
+    """Generate fp8 A/B and fp32 scaleA/scaleB for a multi-K-block A+B test."""
     rng      = np.random.default_rng(seed=M * 100000 + N * 1000 + K + 3)
     nKBlocks = K // 128
     nNBlocks = math.ceil(N / 128)
@@ -303,16 +280,17 @@ def _make_inputs_ab_multik(M, N, K, mPadded):
     cFortran = np.zeros((M, N), dtype=np.float32, order="F")
     dFortran = np.zeros((M, N), dtype=np.float32, order="F")
 
-    # scaleA[M, nKBlocks]: each entry is one E8M0 byte; decoded to fp32 for reference.
-    scaleABytes, scaleARef = _make_e8m0_bytes((M, nKBlocks), rng)
-    scaleAPadded = np.zeros((mPadded, nKBlocks), dtype=np.uint8)
-    scaleAPadded[:M, :] = scaleABytes
+    # scaleA: one fp32 per wave group (64 rows) per K-block. Broadcast to all rows in each group.
+    nRowGroups = mPadded // _ROWS_PER_WAVE
+    scaleAVals = rng.uniform(0.5, 1.5, size=(nRowGroups, nKBlocks)).astype(np.float32)
+    scaleAPadded = np.repeat(scaleAVals, _ROWS_PER_WAVE, axis=0)  # [mPadded, nKBlocks]
+    scaleARef = scaleAPadded[:M, :]  # [M, nKBlocks] fp32 values used by the reference
 
-    # scaleB[nKBlocks, nNBlocks]: one E8M0 byte per (K-block, N-block) pair.
-    scaleBBytes, scaleBRef = _make_e8m0_bytes((nKBlocks, nNBlocks), rng)
+    # scaleB: one fp32 per K-block per N-block.
+    scaleBRef = rng.uniform(0.5, 1.5, size=(nKBlocks, nNBlocks)).astype(np.float32)
 
     return (aFortran, bFortran, cFortran, dFortran,
-            scaleAPadded, scaleBBytes, scaleBRef, aKM, bKN, scaleARef)
+            scaleAPadded, scaleBRef, scaleARef, aKM, bKN)
 
 
 def _run_shape_ab_multik(solution, kernelName, hsaco, chip, M, N, K,
@@ -323,7 +301,7 @@ def _run_shape_ab_multik(solution, kernelName, hsaco, chip, M, N, K,
     numWG   = math.ceil(M / MT0) * math.ceil(N / solution["MacroTile1"])
 
     (aFortran, bFortran, cFortran, dFortran,
-     scaleAPadded, scaleBBytes, scaleBRef, aKM, bKN, scaleARef) = \
+     scaleAPadded, scaleBRef, scaleARef, aKM, bKN) = \
         _make_inputs_ab_multik(M, N, K, mPadded)
 
     if cMatrix is not None:
@@ -336,7 +314,7 @@ def _run_shape_ab_multik(solution, kernelName, hsaco, chip, M, N, K,
 
     nKBlocks = K // 128
     epilogueArgs = [amdgpu_exec.InputArray(_swizzleScaleADevice(scaleAPadded, nKBlocks)),
-                    amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBBytes, nKBlocks))]
+                    amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBRef, nKBlocks))]
     dGpu = _execute_and_compare(solution, kernelName, hsaco, M, N, K, numWG,
                                 aFortran, bFortran, cFortran, dFortran,
                                 epilogueArgs, alpha, beta=beta)
@@ -347,7 +325,7 @@ def _run_shape_a_multik(solution, kernelName, hsaco, chip, M, N, K,
                         alpha=1.0, beta=0.0, cMatrix=None):
     """Run multi-K DeepseekScaleA-only kernel for one (M, N, K) shape.
 
-    scaleB side uses a unit scale inside the mainloop (0x7f = 1.0 in E8M0).
+    scaleB side uses a unit scale (1.0 fp32) inside the mainloop.
     The reference uses scaleA only, with scaleB effectively 1.0.
     """
     MT0     = solution["MacroTile0"]
@@ -355,7 +333,7 @@ def _run_shape_a_multik(solution, kernelName, hsaco, chip, M, N, K,
     numWG   = math.ceil(M / MT0) * math.ceil(N / solution["MacroTile1"])
 
     (aFortran, bFortran, cFortran, dFortran,
-     scaleAPadded, _scaleBBytes, _scaleBRef, aKM, bKN, scaleARef) = \
+     scaleAPadded, _scaleBRef, scaleARef, aKM, bKN) = \
         _make_inputs_ab_multik(M, N, K, mPadded)
 
     if cMatrix is not None:
@@ -381,7 +359,7 @@ def _run_shape_b_multik(solution, kernelName, hsaco, chip, M, N, K,
                         alpha=1.0, beta=0.0, cMatrix=None):
     """Run multi-K DeepseekScaleB-only kernel for one (M, N, K) shape.
 
-    scaleA side uses a unit scale inside the mainloop (0x7f = 1.0 in E8M0).
+    scaleA side uses a unit scale (1.0 fp32) inside the mainloop.
     The reference uses scaleB only, with scaleA effectively 1.0.
     """
     MT0     = solution["MacroTile0"]
@@ -389,7 +367,7 @@ def _run_shape_b_multik(solution, kernelName, hsaco, chip, M, N, K,
     numWG   = math.ceil(M / MT0) * math.ceil(N / solution["MacroTile1"])
 
     (aFortran, bFortran, cFortran, dFortran,
-     _scaleAPadded, scaleBBytes, scaleBRef, aKM, bKN, _scaleARef) = \
+     _scaleAPadded, scaleBRef, _scaleARef, aKM, bKN) = \
         _make_inputs_ab_multik(M, N, K, mPadded)
 
     if cMatrix is not None:
@@ -403,7 +381,7 @@ def _run_shape_b_multik(solution, kernelName, hsaco, chip, M, N, K,
                                 alpha, beta, c_ref)
 
     nKBlocks = K // 128
-    epilogueArgs = [amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBBytes, nKBlocks))]
+    epilogueArgs = [amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBRef, nKBlocks))]
     dGpu = _execute_and_compare(solution, kernelName, hsaco, M, N, K, numWG,
                                 aFortran, bFortran, cFortran, dFortran,
                                 epilogueArgs, alpha, beta=beta)
@@ -417,7 +395,7 @@ def _run_shape_b_multik(solution, kernelName, hsaco, chip, M, N, K,
     ids=[f"M{m}-N{n}-K{k}" for m, n, k in _TEST_SHAPES_MULTIK],
 )
 def test_deepseek_scale_ab_multik_shape(dsab_multik_kernel, M, N, K):
-    """Verify multi-K DeepseekScaleAB output: per-K-block E8M0 scale via MFMA operand."""
+    """Verify multi-K DeepseekScaleAB output: per-K-block fp32 software rescale."""
     solution, kernelName, hsaco, chip = dsab_multik_kernel
     dGpu, dRef = _run_shape_ab_multik(solution, kernelName, hsaco, chip, M, N, K)
     label = (f"MT{solution['MacroTile0']}x{solution['MacroTile1']} "
@@ -432,7 +410,7 @@ def test_deepseek_scale_ab_multik_shape(dsab_multik_kernel, M, N, K):
     ids=[f"M{m}-N{n}-K{k}" for m, n, k in _TEST_SHAPES_MULTIK],
 )
 def test_deepseek_scale_a_multik_shape(dsa_multik_kernel, M, N, K):
-    """Verify multi-K DeepseekScaleA-only: unit scaleB fallback path in MFMA operand."""
+    """Verify multi-K DeepseekScaleA-only: unit scaleB fallback in fp32 software rescale."""
     solution, kernelName, hsaco, chip = dsa_multik_kernel
     dGpu, dRef = _run_shape_a_multik(solution, kernelName, hsaco, chip, M, N, K)
     label = (f"MT{solution['MacroTile0']}x{solution['MacroTile1']} "
@@ -447,7 +425,7 @@ def test_deepseek_scale_a_multik_shape(dsa_multik_kernel, M, N, K):
     ids=[f"M{m}-N{n}-K{k}" for m, n, k in _TEST_SHAPES_MULTIK],
 )
 def test_deepseek_scale_b_multik_shape(dsb_multik_kernel, M, N, K):
-    """Verify multi-K DeepseekScaleB-only: unit scaleA fallback path in MFMA operand."""
+    """Verify multi-K DeepseekScaleB-only: unit scaleA fallback in fp32 software rescale."""
     solution, kernelName, hsaco, chip = dsb_multik_kernel
     dGpu, dRef = _run_shape_b_multik(solution, kernelName, hsaco, chip, M, N, K)
     label = (f"MT{solution['MacroTile0']}x{solution['MacroTile1']} "
@@ -492,7 +470,7 @@ def _run_shape_ab_sk_split(solution, kernelName, hsaco, chip, M, N, K, sk_grid,
     mPadded = math.ceil(M / MT0) * MT0
 
     (aFortran, bFortran, cFortran, dFortran,
-     scaleAPadded, scaleBBytes, scaleBRef, aKM, bKN, scaleARef) = \
+     scaleAPadded, scaleBRef, scaleARef, aKM, bKN) = \
         _make_inputs_ab_multik(M, N, K, mPadded)
 
     if cMatrix is not None:
@@ -505,7 +483,7 @@ def _run_shape_ab_sk_split(solution, kernelName, hsaco, chip, M, N, K, sk_grid,
 
     nKBlocks = K // 128
     epilogueArgs = [amdgpu_exec.InputArray(_swizzleScaleADevice(scaleAPadded, nKBlocks)),
-                    amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBBytes, nKBlocks))]
+                    amdgpu_exec.InputArray(_swizzleScaleBDevice(scaleBRef, nKBlocks))]
     dGpu = _execute_and_compare_sk_split(solution, kernelName, hsaco, M, N, K, sk_grid,
                                          aFortran, bFortran, cFortran, dFortran,
                                          epilogueArgs, alpha, beta=beta)

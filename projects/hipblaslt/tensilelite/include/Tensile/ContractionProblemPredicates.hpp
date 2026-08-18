@@ -2359,6 +2359,142 @@ namespace TensileLite
                 }
             };
 
+            struct DeepseekScaleAq0Equal
+                : public Predicate_CRTP<DeepseekScaleAq0Equal, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                int value;
+
+                DeepseekScaleAq0Equal() = default;
+                DeepseekScaleAq0Equal(int value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "DeepseekScaleAq0";
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.deepseekScaleAq0() == value;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.deepseekScaleAq0(), "==", "sol", value);
+                }
+            };
+
+            struct DeepseekScaleAq1Equal
+                : public Predicate_CRTP<DeepseekScaleAq1Equal, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                int value;
+
+                DeepseekScaleAq1Equal() = default;
+                DeepseekScaleAq1Equal(int value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "DeepseekScaleAq1";
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.deepseekScaleAq1() == value;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.deepseekScaleAq1(), "==", "sol", value);
+                }
+            };
+
+            struct DeepseekScaleBq0Equal
+                : public Predicate_CRTP<DeepseekScaleBq0Equal, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                int value;
+
+                DeepseekScaleBq0Equal() = default;
+                DeepseekScaleBq0Equal(int value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "DeepseekScaleBq0";
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.deepseekScaleBq0() == value;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.deepseekScaleBq0(), "==", "sol", value);
+                }
+            };
+
+            struct DeepseekScaleBq1Equal
+                : public Predicate_CRTP<DeepseekScaleBq1Equal, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                int value;
+
+                DeepseekScaleBq1Equal() = default;
+                DeepseekScaleBq1Equal(int value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "DeepseekScaleBq1";
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.deepseekScaleBq1() == value;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.deepseekScaleBq1(), "==", "sol", value);
+                }
+            };
+
             // Activation
             struct ActivationCheck : public Predicate_CRTP<ActivationCheck, ContractionProblemGemm>
             {

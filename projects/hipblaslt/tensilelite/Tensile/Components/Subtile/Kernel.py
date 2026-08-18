@@ -1435,11 +1435,38 @@ def mainLoop(writer, kernel):
   # asymmetric mixed-scale case where one of A/B has an MX scale and the other
   # does not). Requiring both unscaled would leave the fallback asserting on a
   # missing _subtileUnitScaleVgpr.
-  if miK == 128 and (not usesScaleA(kernel) or not usesScaleB(kernel)):
+  # For DeepseekScale (fp32 software rescale), we also need the unit scale VGPR
+  # because the MFMA is issued with -1,-1 scale and uses the unit fallback.
+  needUnitScale = miK == 128 and (not usesScaleA(kernel) or not usesScaleB(kernel)
+                                  or isDeepseekScale(kernel))
+  if needUnitScale:
       unitScaleVgpr = writer.vgprPool.checkOut(1)
       module.add(VMovB32(dst=vgpr(unitScaleVgpr), src=hex(0x7f7f7f7f),
                          comment="unit scale=1.0 (E8M0) for plain FP8 MFMA"))
       kernel["_subtileUnitScaleVgpr"] = unitScaleVgpr
+
+  # DeepseekScale fp32 software rescale resources:
+  #   partialTile: 4 AGPRs — receives A*B with unit scale from each partial MFMA.
+  #   zeroTile:    4 AGPRs — constant 0.0, used as C input so partialTile = A*B.
+  #   factorVgpr:  2 VGPRs — scratch for fold: f0 = partial, f1 = master.
+  if isDeepseekScale(kernel):
+      partialBase = writer.agprPool.checkOutAligned(4, 4, tag="ds_partialTile")
+      partialTile = RegisterTileInfo(writer.agprPool, RegisterType.Accvgpr)
+      for r in range(4):
+          partialTile.append(partialBase + r)
+
+      zeroBase = writer.agprPool.checkOutAligned(4, 4, tag="ds_zeroTile")
+      zeroTile = RegisterTileInfo(writer.agprPool, RegisterType.Accvgpr)
+      for r in range(4):
+          zeroTile.append(zeroBase + r)
+          module.add(VAccvgprWrite(dst=accvgpr(zeroBase + r), src=0,
+                                   comment=f"DS fp32: init zeroTile AGPR[{r}] = 0.0"))
+
+      factorVgprBase = writer.vgprPool.checkOut(2, tag="ds_factorVgpr")
+
+      kernel["_dsFp32PartialTile"] = partialTile
+      kernel["_dsFp32ZeroTile"] = zeroTile
+      kernel["_dsFp32FactorVgprBase"] = factorVgprBase
   scheduler.populate_instructions(
       writer, kernel,
       tileInfoA=tiA, tileInfoB=tiB, dtileInfo=dtileInfo,
@@ -1518,5 +1545,10 @@ def mainLoop(writer, kernel):
 
   if unitScaleVgpr >= 0:
       writer.vgprPool.checkIn(unitScaleVgpr)
+
+  if isDeepseekScale(kernel):
+      factorVgprBase = kernel.get("_dsFp32FactorVgprBase", -1)
+      if factorVgprBase >= 0:
+          writer.vgprPool.checkIn(factorVgprBase)
 
   return module

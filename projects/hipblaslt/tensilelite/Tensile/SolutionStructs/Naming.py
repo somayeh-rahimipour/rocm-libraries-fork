@@ -233,7 +233,10 @@ def _getName(state, requiredParameters: frozenset, splitGSU: bool, ignoreInterna
   if not use_scale_b:
     requiredParametersTemp.discard("UseDeepseekScaleB")
   if not use_scale_a and not use_scale_b:
-    requiredParametersTemp.discard("DeepseekScaleBlockK")
+    requiredParametersTemp.discard("DeepseekScaleAq0")
+    requiredParametersTemp.discard("DeepseekScaleAq1")
+    requiredParametersTemp.discard("DeepseekScaleBq0")
+    requiredParametersTemp.discard("DeepseekScaleBq1")
 
   for key in sorted(requiredParametersTemp):
     if key not in state or key == "CustomKernelName":

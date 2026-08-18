@@ -115,6 +115,10 @@ namespace TensileLite
                      Base::template Pair<Predicates::Contraction::DQuantSize1Equal>(),
                      Base::template Pair<Predicates::Contraction::UseDeepseekScaleAEqual>(),
                      Base::template Pair<Predicates::Contraction::UseDeepseekScaleBEqual>(),
+                     Base::template Pair<Predicates::Contraction::DeepseekScaleAq0Equal>(),
+                     Base::template Pair<Predicates::Contraction::DeepseekScaleAq1Equal>(),
+                     Base::template Pair<Predicates::Contraction::DeepseekScaleBq0Equal>(),
+                     Base::template Pair<Predicates::Contraction::DeepseekScaleBq1Equal>(),
                      Base::template Pair<Predicates::Contraction::UsePartialRMSResidualAddEqual>(),
                      Base::template Pair<Predicates::Contraction::UsePartialRMSQuantEqual>(),
                      Base::template Pair<Predicates::Contraction::UseGradientEqual>(),
@@ -487,6 +491,30 @@ namespace TensileLite
         template <typename IO>
         struct MappingTraits<Predicates::Contraction::UseDeepseekScaleBEqual, IO>
             : public AutoMappingTraits<Predicates::Contraction::UseDeepseekScaleBEqual, IO>
+        {
+        };
+
+        template <typename IO>
+        struct MappingTraits<Predicates::Contraction::DeepseekScaleAq0Equal, IO>
+            : public AutoMappingTraits<Predicates::Contraction::DeepseekScaleAq0Equal, IO>
+        {
+        };
+
+        template <typename IO>
+        struct MappingTraits<Predicates::Contraction::DeepseekScaleAq1Equal, IO>
+            : public AutoMappingTraits<Predicates::Contraction::DeepseekScaleAq1Equal, IO>
+        {
+        };
+
+        template <typename IO>
+        struct MappingTraits<Predicates::Contraction::DeepseekScaleBq0Equal, IO>
+            : public AutoMappingTraits<Predicates::Contraction::DeepseekScaleBq0Equal, IO>
+        {
+        };
+
+        template <typename IO>
+        struct MappingTraits<Predicates::Contraction::DeepseekScaleBq1Equal, IO>
+            : public AutoMappingTraits<Predicates::Contraction::DeepseekScaleBq1Equal, IO>
         {
         };
 
