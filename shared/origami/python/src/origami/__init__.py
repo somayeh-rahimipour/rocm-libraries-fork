@@ -7,10 +7,6 @@ Origami: Analytical GEMM Solution Selection
 Python bindings for the Origami C++ library.
 """
 
-from ._loader import prepare_runtime
-
-prepare_runtime()
-
 try:
     # Import the compiled extension module
     from .origami import (
