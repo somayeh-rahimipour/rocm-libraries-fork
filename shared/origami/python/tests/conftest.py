@@ -10,11 +10,7 @@ try:
     import torch
 except ImportError:
     pass
-
-try:
-    import origami
-except ImportError:
-    origami = None
+import origami
 
 from helpers import HARDWARE
 
@@ -43,8 +39,6 @@ def hardware():
         origami.hardware_t: Hardware object for testing. Uses real device if available,
                            otherwise creates a mock MI300X (gfx942) configuration.
     """
-    if origami is None:
-        pytest.skip("origami extension not available")
     try:
         # Try to get real hardware from device 0
         return origami.get_hardware_for_device(0)
