@@ -24,6 +24,7 @@
 
 #include <cstdlib>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "stinkytofu/analysis/asm/AsmVerifierPass.hpp"
@@ -66,6 +67,8 @@
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelDynamicPass.hpp"
 #include "stinkytofu/transforms/asm/SwInstructionPrefetchRelStaticPass.hpp"
 #include "stinkytofu/transforms/asm/TDMLoadWaveSyncPass.hpp"
+#include "stinkytofu/transforms/ra/AllocatorRegistry.hpp"
+#include "stinkytofu/transforms/ra/RegisterAllocationPass.hpp"
 #include "stinkytofu/transforms/ssa/LiftAsmRegistersToSSAPass.hpp"
 #include "stinkytofu/transforms/ssa/ReplayLegacyColoringPass.hpp"
 #include "stinkytofu/transforms/ssa/SSADestruction.hpp"
@@ -89,6 +92,16 @@ inline bool hasPassArg(const std::vector<std::string>& args, const char* flag) {
     for (const auto& a : args)
         if (a == flag) return true;
     return false;
+}
+
+// Helper: value of `key=value` in `args`, or `defaultValue` when absent.
+inline std::string passArgValue(const std::vector<std::string>& args, const char* key,
+                                std::string defaultValue = {}) {
+    const std::string prefix = std::string(key) + "=";
+    for (const auto& a : args) {
+        if (a.starts_with(prefix)) return a.substr(prefix.size());
+    }
+    return defaultValue;
 }
 
 // List of available passes
@@ -158,6 +171,20 @@ const std::vector<PassInfo> availablePasses = {
     // ReplayLegacyColoringPass lowers attached SSA back to the registers it was
     // lifted from. Lift followed by replay must not change the program.
     {"ReplayLegacyColoringPass", [](const auto&) { return createReplayLegacyColoringPass(); }},
+    // RegisterAllocationPass accepts:
+    //   allocator=<name>  — registry name (default greedy; pass legacy until greedy lands)
+    //   sgpr              — also colour SGPRs (policies that honour the switch)
+    //   apply             — write the colouring through destroyAttachedSSA
+    //   noVerify          — skip AllocationVerifier
+    {"RegisterAllocationPass",
+     [](const std::vector<std::string>& args) {
+         RegisterAllocationOptions options;
+         options.allocator = passArgValue(args, "allocator", options.allocator);
+         options.allocateSgpr = hasPassArg(args, "sgpr");
+         options.applyToOperands = hasPassArg(args, "apply");
+         options.verify = !hasPassArg(args, "noVerify");
+         return createRegisterAllocationPass(std::move(options));
+     }},
     // DumpStinkyModulePass accepts:
     //   ssaForm  — print attached SSA values instead of physical registers
     //   ssaLive  — also dump SSA live ranges and peak pressure

@@ -37,9 +37,11 @@ TensileLite keeps producing physical numbering; those numbers are variable names
 | `StinkyUnreachableBlockElimPass` | erase CFG-unreachable blocks **before** lift | shipped |
 | `SSASlotIndexes` / `SSALiveIntervals` | program points and live ranges over SSA values | shipped |
 | `AsmTargetRegisters` / `PhysRegMatrix` | allocatable units and their occupancy | shipped |
-| `AllocationConstraints` | tuple runs, merge affinity, hints | to build |
-| `RegisterAllocator` / `AllocatorRegistry` / `RegisterAllocationPass` | the policy seam and its driver | to build |
-| `AllocationVerifier` | legality of any colouring | to build |
+| `AllocationConstraints` | tuple runs, merge affinity, hints | shipped |
+| `RegisterAllocator` / `AllocatorRegistry` / `RegisterAllocationPass` | the policy seam and its driver | shipped |
+| `AllocationVerifier` | legality of any colouring | shipped |
+| `LegacyIdentityAllocator` | identity colouring behind the interface | shipped |
+| `GreedyAllocator` | first non-identity policy | to build |
 
 Lift followed by legacy colouring followed by destruction is an identity transform on the physical program.
 That gate is about the lift machinery, not about allocation.
@@ -246,6 +248,23 @@ std::unique_ptr<Pass> createRegisterAllocationPass(
 
 Injection at construction follows `createStinkyWmmaVgprReorderPass`, which already takes its liveness backend and its algorithm that way.
 Comparing two policies over a corpus is then a config change, not a code change.
+
+`stinkytofu-opt` exposes the same options as a comma-separated list:
+
+```text
+--RegisterAllocationPass=allocator=legacy,sgpr,apply,noVerify
+```
+
+`allocator=<name>` selects the registry entry (`legacy` is registered; `greedy` is the default name and lands next).
+`apply` writes the colouring through `destroyAttachedSSA`; without it the pass is a shadow colouring.
+`sgpr` is forwarded to the policy; the identity allocator colours every class regardless.
+`noVerify` skips the verifier, which is a testing hatch rather than a production switch.
+
+The identity allocator wrapping `createLegacyColoring()` is what proves the seam:
+`--LiftAsmRegistersToSSAPass --RegisterAllocationPass=allocator=legacy,apply` is exactly `ReplayLegacyColoringPass`.
+`tests/filecheck/register_allocation_legacy_identity.stir` holds that equivalence, on a shape whose tuple runs and merge exercise every verifier rule at once.
+
+Conformance is parameterized over `registeredAllocatorNames()`, so registering a policy is what subscribes it to the suite, and a failure is reported against the policy that produced it.
 
 ## 4. Decisions
 
@@ -491,14 +510,16 @@ Alignment, accumulator aliasing, the high-register encoding, occupancy tiers, an
 
 ## 7. Constraints the colourer reads
 
-Recovered from IR, not copied onto the value.
+`AllocationConstraints::build(function, target)` walks operands once, with `liftedSSAUnits()`, and block-argument incoming lists.
+A policy reads the result; it does not repeat the walk.
 
 | Constraint | Source | Rule |
 |---|---|---|
-| Consecutive range | operand + `liftedSSAUnits()` | the slots of one operand occupy consecutive phys units in operand order |
-| Tied / RMW | overlapping `PhysicalBinding` on a src and a dest, plus `isReadWrite` | may share a phys unit |
-| PHI / block argument | `SSABlockArgument.incoming` | result and every incoming value get the same colour |
-| Hint | `PhysicalBinding` | first candidate, not identity |
+| Consecutive range | operand + `liftedSSAUnits()` | `tupleRuns()`: the slots of one operand occupy consecutive phys units in operand order |
+| PHI / block argument | `SSABlockArgument.incoming` | `affinitySets()`: result and every incoming value get the same colour |
+| Hint | `PhysicalBinding` | `hintFor(id)`: first candidate, not identity |
+| Class | `StinkySSAValue::type()` | `classOf(id)` / `isAllocatable(id)` |
+| Tied / RMW | overlapping `PhysicalBinding` on a src and a dest, plus `isReadWrite` | may share a phys unit; live intervals already make that legal |
 | Ignored specials | not lifted | not in the matrix |
 | Alignment | none yet | deferred |
 | ABI precolour | inferred live-ins, no ABI metadata | ordinary values, or pinned to `PhysicalBinding` until ABI exists |
@@ -517,7 +538,12 @@ They constrain each other only when they appear together in one operand.
 Inferred live-ins interfere from function entry.
 That is conservative and correct; it is not a blocker.
 
+A live-in block argument has an empty incoming list, so it does not appear in any affinity set.
+
 ## 8. The greedy policy
+
+Not registered yet.
+The driver, verifier, and CLI do not change when it lands: it is a class plus a registration as `"greedy"`.
 
 Worklist of unassigned `valueId`s.
 Priority is `useCount × loopDepth / intervalLength`, with `valueId` as the tie break so runs are deterministic.
@@ -546,14 +572,14 @@ That is what keeps `capabilities().mayRecolourMerges` false, and therefore what 
 
 ## 9. Verifier
 
-Independent of the colourer, run on every `AllocationResult` including legacy:
+`verifyAllocation(function, result, context)` is independent of the colourer and runs on every `AllocationResult` including legacy:
 
-- `result.shape()` matches the arena
-- every value is assigned
+- `result.shape()` matches the arena (and the function has not changed since it was lifted)
+- every value is assigned a full-DWORD register of its class
+- that register is allocatable and not reserved
 - no two overlapping intervals share a physical unit
-- every multi-DWORD operand's units are consecutive in operand order
-- every block argument and its incoming values share a colour
-- reserved units are unused
+- every `tupleRuns()` entry is consecutive in operand order
+- every `affinitySets()` entry shares one colour
 
 Failure is a diagnostic with `valueId`, class, interval, and the conflicting occupant.
 Do not apply a colouring the verifier rejects.

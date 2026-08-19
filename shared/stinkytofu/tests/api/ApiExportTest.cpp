@@ -84,6 +84,8 @@
 #include "stinkytofu/transforms/asm/StinkyUnreachableBlockElimPass.hpp"
 #include "stinkytofu/transforms/asm/StinkyWaitCntInsertionPass.hpp"
 #include "stinkytofu/transforms/asm/TDMLoadWaveSyncPass.hpp"
+#include "stinkytofu/transforms/ra/AllocatorRegistry.hpp"
+#include "stinkytofu/transforms/ra/RegisterAllocationPass.hpp"
 #include "stinkytofu/transforms/ssa/LiftAsmRegistersToSSAPass.hpp"
 #include "stinkytofu/transforms/ssa/ReplayLegacyColoringPass.hpp"
 #include "stinkytofu/transforms/ssa/SSADestruction.hpp"
@@ -257,6 +259,9 @@ TEST(ApiExport, PassFactories) {
     EXPECT_NE(createLiftAsmRegistersToSSAPass(), nullptr);
     EXPECT_NE(createRemoveDefUseAnalysisPass(), nullptr);
     EXPECT_NE(createReplayLegacyColoringPass(), nullptr);
+    EXPECT_NE(createRegisterAllocationPass(), nullptr);
+    AllocatorRegistry::registerAllAllocators();
+    EXPECT_NE(AllocatorRegistry::createAllocator("legacy"), nullptr);
     EXPECT_NE(createDumpStinkyModulePass({}), nullptr);
     EXPECT_NE(createPeepholeOptimizationPass(), nullptr);
     EXPECT_NE(createDeadCodeEliminationPass(), nullptr);

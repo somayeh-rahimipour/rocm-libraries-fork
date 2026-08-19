@@ -68,6 +68,10 @@ set(UNIT_ASM_TEST_FILES
     unit/ssa/AttachedSSATest.cpp
     unit/ssa/SSALiveIntervalsTest.cpp
     unit/ra/PhysRegMatrixTest.cpp
+    unit/ra/AllocationConstraintsTest.cpp
+    unit/ra/AllocationVerifierTest.cpp
+    unit/ra/AllocatorConformanceTest.cpp
+    unit/ra/RegisterAllocationPassTest.cpp
     unit/ssa/AsmPrinterSSAFormTest.cpp
     unit/ssa/LiftAsmRegistersToSSATest.cpp
     unit/asm/DefUseAnalysisCleanupTest.cpp
