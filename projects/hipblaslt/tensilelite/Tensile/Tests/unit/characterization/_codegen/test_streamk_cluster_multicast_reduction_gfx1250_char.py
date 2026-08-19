@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
-"""gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] 2-D DP multicast codegen.
+"""gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] cluster multicast+reduction.
 
-2-D spatial A+B multicast in the DP window (same meaning as ForceDPOnly=1),
+Spatial A+B multicast in the DP window (same meaning as ForceDPOnly=1),
 ordinary SK-tail loads, cluster-barrier reduction of SK partials.
 """
 
@@ -26,11 +26,11 @@ _CONFIG = os.path.join(
     "test_data",
     "_designed",
     "gfx1250",
-    "streamk_cluster_2d_dp.yaml",
+    "streamk_cluster_multicast_reduction.yaml",
 )
 
 
-def test_streamk_cluster_2d_dp_gfx1250_emits_assembly():
+def test_streamk_cluster_multicast_reduction_gfx1250_emits_assembly():
     results = emit_kernels_from_config(_CONFIG, limit=4, arch=_ARCH)
     assert_real_gfx1250_kernels(results)
     for base, src, _err in results:
@@ -42,16 +42,16 @@ def test_streamk_cluster_2d_dp_gfx1250_emits_assembly():
             f"Kernel {base!r}: ttmp reread emitted under ClusterDim != [1, 1]"
         )
         assert "DP fold: StreamKIdx = batch*(nWG0*nWG1) + N*nWG0 + M" in src, (
-            f"Kernel {base!r}: missing M-fastest 2-D DP StreamK index fold"
+            f"Kernel {base!r}: missing M-fastest StreamK index fold"
         )
         assert "2-D cluster: StreamKIdx = WorkGroup0*Ck + WorkGroup1" not in src, (
-            f"Kernel {base!r}: 2-D DP multicast must not use the K-fastest [1,C] fold"
+            f"Kernel {base!r}: cluster multicast+reduction must not use the K-fastest [1,C] fold"
         )
         assert "StreamKFactored: B-multicast along Cs=" not in src, (
-            f"Kernel {base!r}: 2-D DP multicast must not emit K-slice B-masks"
+            f"Kernel {base!r}: cluster multicast+reduction must not emit K-slice B-masks"
         )
         assert "k = StreamKIdx & (Ck-1)" not in src, (
-            f"Kernel {base!r}: 2-D DP multicast must not decode a K-slice rank from StreamKIdx"
+            f"Kernel {base!r}: cluster multicast+reduction must not decode a K-slice rank from StreamKIdx"
         )
         assert "remap StreamKIdx to cluster-linear SK rank" in src, (
             f"Kernel {base!r}: missing DP->SK cluster-linear StreamKIdx remap"

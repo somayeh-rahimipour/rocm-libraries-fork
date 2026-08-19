@@ -2,13 +2,14 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 ################################################################################
-# Unit tests for StreamK=3 ForceDPOnly=0 cluster reduction and 2-D DP multicast.
+# Unit tests for StreamK=3 ForceDPOnly=0 cluster reduction and
+# cluster multicast+reduction.
 #
 # ClusterDim = [Cs, Ck] on the two-tile path:
 #   [C, 1] -> existing non-multicast 1-D SK3 cluster
 #   [1, C] -> pure K-split cluster reduction (cluster-barrier fast path)
-#   [Cs,Ck] both > 1 -> 2-D A+B multicast in DP, cluster-barrier reduction
-#                        on the SK tail
+#   [Cs,Ck] both > 1 -> cluster multicast+reduction (A+B multicast in DP,
+#                        cluster-barrier reduction on the SK tail)
 #
 # Usage:
 #   pytest test_streamk_cluster_reduction.py -v
@@ -91,7 +92,7 @@ class TestPredicates:
         assert streamKClusterReduction(st)
         assert not streamK2DMulticast(st)
 
-    def test_fdpo0_2d_dp_multicast(self):
+    def test_fdpo0_cluster_multicast_reduction(self):
         st = {"StreamK": 3, "StreamKForceDPOnly": 0, "ClusterDim": [2, 2]}
         assert streamKMulticast(st)
         assert streamKClusterReduction(st)
@@ -115,15 +116,15 @@ class TestDerivation:
             assert st["Multicast"] is False
             assert st["ClusterBarrier"] is False
 
-    def test_2d_dp_multicast_derives_multicast_and_reduction(self, tmp_path):
-        cfg = _write_variant(tmp_path, "2d_dp.yaml",
+    def test_cluster_multicast_reduction_derives(self, tmp_path):
+        cfg = _write_variant(tmp_path, "multicast_reduction.yaml",
                              fork_overrides={
                                  "StreamKForceDPOnly": [0],
                                  "ClusterDim": [[2, 2]],
                                  "StreamKFixupTreeReduction": [0],
                              })
         states = _derive_states(cfg)
-        assert states, "[2,2] ForceDPOnly=0 must derive as 2-D DP multicast"
+        assert states, "[2,2] ForceDPOnly=0 must derive as cluster multicast+reduction"
         for st in states:
             assert st["ClusterDim"] == [2, 2]
             assert streamKClusterReduction(st)
