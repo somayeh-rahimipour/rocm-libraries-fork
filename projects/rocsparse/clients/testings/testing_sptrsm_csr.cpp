@@ -311,6 +311,13 @@ void testing_sptrsm_csr_bad_arg(const Arguments& arg)
                                                        p_error));
                         break;
                     }
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+                    case rocsparse_sptrsm_input_diagonal_mode:
+                    {
+                        // Not exercised by this list; handled for -Wswitch completeness.
+                        break;
+                    }
+#endif
                     }
                 }
                 //
@@ -432,6 +439,67 @@ void testing_sptrsm_csr_bad_arg(const Arguments& arg)
     }
 }
 
+// Host reference for the diagonal backsolve on a matrix RHS: C[i,:] = alpha * C[i,:]
+// / f(d_i), applied in place on the RHS already laid out in C (order_C / ldc), with
+// f identity (signed), conjugation (signed + conjugate transpose) or |.| (absolute).
+// A missing or numerically zero diagonal reports a pivot so the caller skips the
+// element comparison (matching how the device leaves those rows unscaled).
+template <typename I, typename J, typename T>
+static void host_diagonal_sm(J                    M,
+                             J                    nrhs,
+                             rocsparse_operation  trans_A,
+                             T                    alpha,
+                             const I*             csr_row_ptr,
+                             const J*             csr_col_ind,
+                             const T*             csr_val,
+                             T*                   C,
+                             int64_t              ldc,
+                             rocsparse_order      order_C,
+                             rocsparse_index_base base,
+                             int32_t              diagonal_mode,
+                             J*                   struct_pivot,
+                             J*                   numeric_pivot)
+{
+    const bool conj     = (trans_A == rocsparse_operation_conjugate_transpose);
+    const bool absolute = (diagonal_mode == 2); // rocsparse_diagonal_mode_absolute
+    *struct_pivot       = -1;
+    *numeric_pivot      = -1;
+    for(J row = 0; row < M; ++row)
+    {
+        T    d     = static_cast<T>(0);
+        bool found = false;
+        for(I j = csr_row_ptr[row] - base; j < csr_row_ptr[row + 1] - base; ++j)
+        {
+            if(csr_col_ind[j] - base == row)
+            {
+                d     = csr_val[j];
+                found = true;
+                break;
+            }
+        }
+
+        const bool pivot = (!found || d == static_cast<T>(0));
+        if(!found && *struct_pivot == -1)
+        {
+            *struct_pivot = row + base;
+        }
+        if(found && d == static_cast<T>(0) && *numeric_pivot == -1)
+        {
+            *numeric_pivot = row + base;
+        }
+
+        const T denom
+            = absolute ? static_cast<T>(rocsparse_abs(d)) : (conj ? rocsparse_conj(d) : d);
+        for(J col = 0; col < nrhs; ++col)
+        {
+            const int64_t idx
+                = (order_C == rocsparse_order_column) ? (row + ldc * col) : (ldc * row + col);
+            const T xv = alpha * C[idx];
+            C[idx]     = pivot ? xv : (xv / denom);
+        }
+    }
+}
+
 template <typename I, typename J, typename T>
 void testing_sptrsm_csr(const Arguments& arg)
 {
@@ -441,6 +509,15 @@ void testing_sptrsm_csr(const Arguments& arg)
     {
         return;
     }
+
+#ifndef ROCSPARSE_WITH_DIAGONAL_SOLVE
+    // gentest always emits the diagonal_mode argument; skip the diagonal cases when
+    // the diagonal solve is disabled at build time (BUILD_WITH_DIAGONAL_SOLVE=OFF).
+    if(arg.diagonal_mode != 0)
+    {
+        return;
+    }
+#endif
 
     const J                    K               = arg.K;
     const rocsparse_operation  trans_A         = arg.transA;
@@ -769,6 +846,20 @@ void testing_sptrsm_csr(const Arguments& arg)
                                                          p_error));
     }
 
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    // Diagonal backsolve mode (togglable; a no-op when arg.diagonal_mode == none).
+    {
+        const rocsparse_diagonal_mode diagonal_mode
+            = static_cast<rocsparse_diagonal_mode>(arg.diagonal_mode);
+        CHECK_ROCSPARSE_ERROR(rocsparse_sptrsm_set_input(handle,
+                                                         sptrsm_descr,
+                                                         rocsparse_sptrsm_input_diagonal_mode,
+                                                         &diagonal_mode,
+                                                         sizeof(diagonal_mode),
+                                                         p_error));
+    }
+#endif
+
     {
         size_t buffer_size_in_bytes;
         CHECK_ROCSPARSE_ERROR(rocsparse_sptrsm_buffer_size(handle,
@@ -800,23 +891,43 @@ void testing_sptrsm_csr(const Arguments& arg)
         // CPU csrsm
         J analysis_pivot = -1;
         J solve_pivot    = -1;
-        host_csrsm<I, J, T>(M,
-                            K,
-                            nnz_A,
-                            trans_A,
-                            trans_C,
-                            halpha[0],
-                            hA.ptr,
-                            hA.ind,
-                            hA.val,
-                            hC,
-                            ldc,
-                            order_C,
-                            diag,
-                            uplo,
-                            base,
-                            &analysis_pivot,
-                            &solve_pivot);
+        if(arg.diagonal_mode != 0)
+        {
+            host_diagonal_sm<I, J, T>(M,
+                                      K,
+                                      trans_A,
+                                      halpha[0],
+                                      hA.ptr,
+                                      hA.ind,
+                                      hA.val,
+                                      hC,
+                                      ldc,
+                                      order_C,
+                                      base,
+                                      arg.diagonal_mode,
+                                      &analysis_pivot,
+                                      &solve_pivot);
+        }
+        else
+        {
+            host_csrsm<I, J, T>(M,
+                                K,
+                                nnz_A,
+                                trans_A,
+                                trans_C,
+                                halpha[0],
+                                hA.ptr,
+                                hA.ind,
+                                hA.val,
+                                hC,
+                                ldc,
+                                order_C,
+                                diag,
+                                uplo,
+                                base,
+                                &analysis_pivot,
+                                &solve_pivot);
+        }
 
         CHECK_ROCSPARSE_ERROR(rocsparse_set_pointer_mode(handle, rocsparse_pointer_mode_host));
 
