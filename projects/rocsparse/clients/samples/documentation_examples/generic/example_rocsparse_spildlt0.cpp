@@ -312,6 +312,240 @@ int main()
     }
     }
 
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    //
+    // Back-solve A x = b using the computed factor M ~= L |D| L^H.
+    //
+    // The compute stage overwrote matA in place: its strictly-lower part holds L
+    // (with an implicit unit diagonal) and its diagonal holds D. Solving A x = b
+    // therefore splits into three solves that all reuse the same factor matrix:
+    //
+    //     L y = b     (lower, unit diagonal, regular triangular solve)
+    //     |D| z = y   (diagonal-only solve, absolute mode)
+    //     L^H x = z   (lower + transpose, unit diagonal, regular triangular solve)
+    //
+    // The absolute diagonal mode divides by |D|, which turns the incomplete factor
+    // into the SPD operator L |D| L^H -- a valid preconditioner for symmetric
+    // Krylov methods even when D is indefinite.
+    //
+
+    // Right-hand side b = [1, 1, 1, 1] plus work vectors y, z and solution x.
+    const double hb[m] = {1.0, 1.0, 1.0, 1.0};
+
+    double* d_b;
+    double* d_y;
+    double* d_z;
+    double* d_x;
+    HIP_CHECK(hipMalloc(&d_b, sizeof(double) * m));
+    HIP_CHECK(hipMalloc(&d_y, sizeof(double) * m));
+    HIP_CHECK(hipMalloc(&d_z, sizeof(double) * m));
+    HIP_CHECK(hipMalloc(&d_x, sizeof(double) * m));
+    HIP_CHECK(hipMemcpy(d_b, hb, sizeof(double) * m, hipMemcpyHostToDevice));
+
+    rocsparse_dnvec_descr vecB, vecY, vecZ, vecX;
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vecB, m, d_b, data_type));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vecY, m, d_y, data_type));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vecZ, m, d_z, data_type));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vecX, m, d_x, data_type));
+
+    // The factor is lower triangular with an implicit unit diagonal (L); D lives on
+    // the diagonal and is applied through the diagonal solve mode.
+    const rocsparse_fill_mode factor_fill_mode = rocsparse_fill_mode_lower;
+    const rocsparse_diag_type factor_diag_type = rocsparse_diag_type_unit;
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        matA, rocsparse_spmat_fill_mode, &factor_fill_mode, sizeof(factor_fill_mode)));
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        matA, rocsparse_spmat_diag_type, &factor_diag_type, sizeof(factor_diag_type)));
+
+    const double sptrsv_alpha = 1.0;
+
+    // Helper running one SpTRSV stage, allocating and freeing its temporary buffer.
+    auto sptrsv_run_stage = [&](rocsparse_sptrsv_descr descr,
+                                rocsparse_dnvec_descr  vec_in,
+                                rocsparse_dnvec_descr  vec_out,
+                                rocsparse_sptrsv_stage stage) -> int {
+        size_t buffer_size;
+        void*  buffer = nullptr;
+        ROCSPARSE_CHECK(rocsparse_sptrsv_buffer_size(
+            handle, descr, matA, vec_in, vec_out, stage, &buffer_size, nullptr));
+        HIP_CHECK(hipMalloc(&buffer, buffer_size));
+        ROCSPARSE_CHECK(rocsparse_sptrsv(
+            handle, descr, matA, vec_in, vec_out, stage, buffer_size, buffer, nullptr));
+        HIP_CHECK(hipFree(buffer));
+        return 0;
+    };
+
+    const rocsparse_sptrsv_alg      sptrsv_alg   = rocsparse_sptrsv_alg_default;
+    const rocsparse_datatype        sptrsv_dtype = rocsparse_datatype_f64_r;
+    const rocsparse_analysis_policy sptrsv_apol  = rocsparse_analysis_policy_reuse;
+
+    //
+    // Descriptor #1 (operation = none): solves L y = b, then |D| z = y by toggling
+    // the diagonal mode between the two compute calls. The analysis is shared
+    // because both reuse the same op(A).
+    //
+    rocsparse_sptrsv_descr sptrsv_descr;
+    ROCSPARSE_CHECK(rocsparse_create_sptrsv_descr(&sptrsv_descr));
+
+    const rocsparse_operation op_none = rocsparse_operation_none;
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_alg,
+                                               &sptrsv_alg,
+                                               sizeof(sptrsv_alg),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_operation,
+                                               &op_none,
+                                               sizeof(op_none),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_scalar_datatype,
+                                               &sptrsv_dtype,
+                                               sizeof(sptrsv_dtype),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_compute_datatype,
+                                               &sptrsv_dtype,
+                                               sizeof(sptrsv_dtype),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_analysis_policy,
+                                               &sptrsv_apol,
+                                               sizeof(sptrsv_apol),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_scalar_alpha,
+                                               &sptrsv_alpha,
+                                               sizeof(&sptrsv_alpha),
+                                               nullptr));
+
+    // Shared analysis for op(A) = A (lower).
+    if(sptrsv_run_stage(sptrsv_descr, vecB, vecY, rocsparse_sptrsv_stage_analysis) != 0)
+    {
+        return -1;
+    }
+
+    // L y = b (regular lower solve).
+    rocsparse_diagonal_mode diag_mode = rocsparse_diagonal_mode_none;
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_diagonal_mode,
+                                               &diag_mode,
+                                               sizeof(diag_mode),
+                                               nullptr));
+    if(sptrsv_run_stage(sptrsv_descr, vecB, vecY, rocsparse_sptrsv_stage_compute) != 0)
+    {
+        return -1;
+    }
+
+    // |D| z = y (diagonal-only solve, absolute mode) reusing the same analysis.
+    diag_mode = rocsparse_diagonal_mode_absolute;
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr,
+                                               rocsparse_sptrsv_input_diagonal_mode,
+                                               &diag_mode,
+                                               sizeof(diag_mode),
+                                               nullptr));
+    if(sptrsv_run_stage(sptrsv_descr, vecY, vecZ, rocsparse_sptrsv_stage_compute) != 0)
+    {
+        return -1;
+    }
+
+    ROCSPARSE_CHECK(rocsparse_destroy_sptrsv_descr(sptrsv_descr));
+
+    //
+    // Descriptor #2 (operation = transpose): solves L^H x = z. The transpose needs
+    // its own analysis, so it uses a separate descriptor.
+    //
+    rocsparse_sptrsv_descr sptrsv_descr_t;
+    ROCSPARSE_CHECK(rocsparse_create_sptrsv_descr(&sptrsv_descr_t));
+
+    const rocsparse_operation     op_transpose = rocsparse_operation_transpose;
+    const rocsparse_diagonal_mode diag_none    = rocsparse_diagonal_mode_none;
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_alg,
+                                               &sptrsv_alg,
+                                               sizeof(sptrsv_alg),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_operation,
+                                               &op_transpose,
+                                               sizeof(op_transpose),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_scalar_datatype,
+                                               &sptrsv_dtype,
+                                               sizeof(sptrsv_dtype),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_compute_datatype,
+                                               &sptrsv_dtype,
+                                               sizeof(sptrsv_dtype),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_analysis_policy,
+                                               &sptrsv_apol,
+                                               sizeof(sptrsv_apol),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_diagonal_mode,
+                                               &diag_none,
+                                               sizeof(diag_none),
+                                               nullptr));
+    ROCSPARSE_CHECK(rocsparse_sptrsv_set_input(handle,
+                                               sptrsv_descr_t,
+                                               rocsparse_sptrsv_input_scalar_alpha,
+                                               &sptrsv_alpha,
+                                               sizeof(&sptrsv_alpha),
+                                               nullptr));
+
+    if(sptrsv_run_stage(sptrsv_descr_t, vecZ, vecX, rocsparse_sptrsv_stage_analysis) != 0)
+    {
+        return -1;
+    }
+    if(sptrsv_run_stage(sptrsv_descr_t, vecZ, vecX, rocsparse_sptrsv_stage_compute) != 0)
+    {
+        return -1;
+    }
+
+    ROCSPARSE_CHECK(rocsparse_destroy_sptrsv_descr(sptrsv_descr_t));
+
+    //
+    // Copy the solution back to the host and print it.
+    //
+    HIP_CHECK(hipStreamSynchronize(stream));
+    double hx[m];
+    HIP_CHECK(hipMemcpy(hx, d_x, sizeof(double) * m, hipMemcpyDeviceToHost));
+
+    std::cout << "Solution x of the L |D| L^H back-solve:";
+    for(int32_t i = 0; i < m; ++i)
+    {
+        std::cout << " " << hx[i];
+    }
+    std::cout << std::endl;
+
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vecB));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vecY));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vecZ));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vecX));
+    HIP_CHECK(hipFree(d_b));
+    HIP_CHECK(hipFree(d_y));
+    HIP_CHECK(hipFree(d_z));
+    HIP_CHECK(hipFree(d_x));
+#endif
+
     HIP_CHECK(hipFree(non_persistent_buffer));
 
     ROCSPARSE_CHECK(rocsparse_spildlt0_descr_destroy(handle, spildlt0_descr, nullptr));

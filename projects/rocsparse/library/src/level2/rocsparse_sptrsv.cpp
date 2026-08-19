@@ -33,10 +33,13 @@
 #include "../conversion/rocsparse_convert_array.hpp"
 #include "../conversion/rocsparse_convert_scalar.hpp"
 #include "internal/level2/rocsparse_csrsv.h"
+#include "rocsparse_assign_async.hpp"
 #include "rocsparse_coosv.hpp"
 #include "rocsparse_cscsv.hpp"
 #include "rocsparse_csrsv.hpp"
+#include "rocsparse_diagonal_solve.hpp"
 #include "rocsparse_sptrsv_descr.hpp"
+#include "rocsparse_trm_info.hpp"
 
 template <>
 inline bool rocsparse::enum_utils::is_invalid(rocsparse_sptrsv_stage value)
@@ -76,6 +79,9 @@ inline bool rocsparse::enum_utils::is_invalid(rocsparse_sptrsv_input value)
     case rocsparse_sptrsv_input_scalar_datatype:
     case rocsparse_sptrsv_input_compute_datatype:
     case rocsparse_sptrsv_input_analysis_policy:
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    case rocsparse_sptrsv_input_diagonal_mode:
+#endif
     {
         return false;
     }
@@ -172,6 +178,28 @@ try
         sptrsv_descr->set_scalar_alpha(data);
         return rocsparse_status_success;
     }
+
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    case rocsparse_sptrsv_input_diagonal_mode:
+    {
+        // No stage guard: the diagonal mode is meant to be toggled between compute
+        // calls on the same descriptor (e.g. L-solve, then |D|-solve, then Lᵀ-solve).
+        ROCSPARSE_CHECKARG(4,
+                           data_size_in_bytes,
+                           data_size_in_bytes != sizeof(rocsparse_diagonal_mode),
+                           rocsparse_status_invalid_size);
+        const rocsparse_diagonal_mode diagonal_mode
+            = *reinterpret_cast<const rocsparse_diagonal_mode*>(data);
+        ROCSPARSE_CHECKARG(3,
+                           data,
+                           (diagonal_mode != rocsparse_diagonal_mode_none
+                            && diagonal_mode != rocsparse_diagonal_mode_signed
+                            && diagonal_mode != rocsparse_diagonal_mode_absolute),
+                           rocsparse_status_invalid_value);
+        sptrsv_descr->set_diagonal_mode(diagonal_mode);
+        return rocsparse_status_success;
+    }
+#endif
 
     case rocsparse_sptrsv_input_compute_datatype:
     {
@@ -749,6 +777,117 @@ namespace rocsparse
 
             const rocsparse_datatype alpha_datatype = sptrsv_descr->get_compute_datatype();
             sptrsv_descr->m_batch_count             = dnvec_descr_y->batch_count;
+
+            // Diagonal backsolve (e.g. the D / |D| step of an L D Lᵀ solve). It has
+            // no inter-row dependency and reuses the per-row diagonal offsets
+            // (trm_info::diag_ind) collected during the L / Lᵀ analysis on the same
+            // descriptor. CSC is expressed as a CSR view sharing the same arrays
+            // (build_csr_from_csc), exactly like the regular CSC solve.
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+            if(sptrsv_descr->get_diagonal_mode() != rocsparse_diagonal_mode_none)
+            {
+                rocsparse_csrsv_info csrsv_info = sptrsv_descr->get_csrsv_info();
+                RETURN_WITH_MESSAGE_IF_ROCSPARSE_ERROR(
+                    (csrsv_info == nullptr) ? rocsparse_status_invalid_pointer
+                                            : rocsparse_status_success,
+                    "the analysis stage must be executed before a diagonal solve");
+
+                // Resolve the effective CSR descriptor and the (operation, fill_mode)
+                // key under which the analysis stored the diagonal offsets. For CSC
+                // the diagonal value a_ii lives at the same position in the shared
+                // val array, so the CSR view's diag_ind indexes it directly; the
+                // conjugation of a_ii is still driven by the original operation.
+                rocsparse_const_spmat_descr eff     = A;
+                rocsparse_operation         slot_op = operation;
+                _rocsparse_mat_descr        descr_csr;
+                _rocsparse_spmat_descr      mat_csr;
+                switch(format)
+                {
+                case rocsparse_format_csr:
+                {
+                    break;
+                }
+                case rocsparse_format_csc:
+                {
+#ifndef ROCSPARSE_WITH_CSC_TRSV
+                    RETURN_IF_ROCSPARSE_ERROR(rocsparse_status_not_implemented);
+#else
+                    rocsparse::build_csr_from_csc(*A, mat_csr, descr_csr);
+                    eff     = &mat_csr;
+                    slot_op = rocsparse::cscsv_operation_to_csr(operation);
+                    break;
+#endif
+                }
+                default:
+                {
+                    RETURN_IF_ROCSPARSE_ERROR(rocsparse_status_not_implemented);
+                }
+                }
+
+                const rocsparse::trm_info_t* trm_info
+                    = csrsv_info->get(slot_op, eff->descr->fill_mode);
+                RETURN_WITH_MESSAGE_IF_ROCSPARSE_ERROR(
+                    (trm_info == nullptr || trm_info->get_diag_ind() == nullptr)
+                        ? rocsparse_status_invalid_pointer
+                        : rocsparse_status_success,
+                    "the analysis stage did not provide the diagonal offsets required by the "
+                    "diagonal solve");
+
+                const int64_t batch_count = dnvec_descr_y->batch_count;
+                hipStream_t   stream      = handle->stream;
+
+                // Zero-pivot reporting mirrors the csrsv numeric path: seed the
+                // singularity position with the analysis zero pivot, then let the
+                // kernel record numeric (or structural) zeros on the diagonal.
+                csrsv_info->create_singularity_numeric_exact(batch_count, eff->col_type, stream);
+                auto numeric_exact = csrsv_info->get_singularity_numeric_exact();
+                if(eff->col_type == rocsparse_indextype_i32)
+                {
+                    RETURN_IF_ROCSPARSE_ERROR(rocsparse::assign_device_async<int32_t>(
+                        batch_count,
+                        (int32_t*)numeric_exact->get_position(),
+                        (const int32_t*)csrsv_info->get_position(),
+                        stream));
+                }
+                else
+                {
+                    RETURN_IF_ROCSPARSE_ERROR(rocsparse::assign_device_async<int64_t>(
+                        batch_count,
+                        (int64_t*)numeric_exact->get_position(),
+                        (const int64_t*)csrsv_info->get_position(),
+                        stream));
+                }
+
+                // Single right-hand side: a vector is a dense block with nrhs == 1,
+                // a column stride of 0 and the vector increment as the row stride.
+                RETURN_IF_ROCSPARSE_ERROR(
+                    rocsparse::diagonal_solve(handle,
+                                              operation,
+                                              sptrsv_descr->get_diagonal_mode(),
+                                              alpha,
+                                              eff,
+                                              eff->row_type,
+                                              trm_info->get_diag_ind(),
+                                              static_cast<int64_t>(1),
+                                              dnvec_descr_x->const_values,
+                                              dnvec_descr_x->inc,
+                                              static_cast<int64_t>(0),
+                                              dnvec_descr_x->batch_stride,
+                                              dnvec_descr_y->values,
+                                              dnvec_descr_y->inc,
+                                              static_cast<int64_t>(0),
+                                              dnvec_descr_y->batch_stride,
+                                              batch_count,
+                                              false,
+                                              numeric_exact->get_position(),
+                                              1,
+                                              handle->pointer_mode == rocsparse_pointer_mode_host));
+
+                sptrsv_descr->set_stage(rocsparse_sptrsv_stage_compute);
+                return rocsparse_status_success;
+            }
+#endif
+
             switch(format)
             {
             case rocsparse_format_csr:

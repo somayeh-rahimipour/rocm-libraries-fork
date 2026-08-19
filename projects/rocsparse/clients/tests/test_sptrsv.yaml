@@ -100,6 +100,31 @@ Tests:
   formatA: [rocsparse_format_csr, rocsparse_format_csc]
   batch_count: [2,4]
 
+# Batched diagonal / |D| backsolve (rocsparse_diagonal_mode). CSR only; exercised
+# across non-transpose, transpose and conjugate-transpose since a diagonal matrix is
+# its own transpose (the conjugate transpose conjugates the diagonal). The matrix
+# carries a lower non-unit diagonal so every row has a stored diagonal entry.
+# CSR and CSC are both exercised (batched); CSC reuses the CSR view of the shared
+# arrays, so the diagonal a_ii is read from the same position.
+- name: sptrsv_diagonal
+  category: pre_checkin
+  function: sptrsv
+  indextype: *i32i32_i64i32_i64i64
+  precision: *single_double_precisions_complex_real
+  M_N: *M_N_csr_range_checkin
+  alpha_alphai: *alpha_csr_range_checkin
+  transA: [rocsparse_operation_none, rocsparse_operation_transpose, rocsparse_operation_conjugate_transpose]
+  diag: [rocsparse_diag_type_non_unit]
+  uplo: [rocsparse_fill_mode_lower]
+  diagonal_mode: [rocsparse_diagonal_mode_signed, rocsparse_diagonal_mode_absolute]
+  baseA: [rocsparse_index_base_zero, rocsparse_index_base_one]
+  apol: *all_rocsparse_analysis_policy
+  sptrsv_alg: [rocsparse_sptrsv_alg_default]
+  matrix: [rocsparse_matrix_random]
+  matrix_type: [rocsparse_matrix_type_general]
+  formatA: [rocsparse_format_csr, rocsparse_format_csc]
+  batch_count: [2,4]
+
 - name: sptrsv_file
   category: pre_checkin
   function: sptrsv

@@ -38,6 +38,9 @@ protected:
     rocsparse_analysis_policy              m_analysis_policy;
     std::shared_ptr<_rocsparse_csrsv_info> m_csrsv_info;
     rocsparse_format                       m_format{};
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    rocsparse_diagonal_mode m_diagonal_mode{rocsparse_diagonal_mode_none};
+#endif
 
 public:
     int64_t m_batch_count{};
@@ -66,6 +69,11 @@ public:
     rocsparse_csrsv_info get_csrsv_info();
     void                 set_csrsv_info(rocsparse_csrsv_info value);
     void                 set_shared_csrsv_info(std::shared_ptr<_rocsparse_csrsv_info> value);
+
+#if defined(ROCSPARSE_WITH_DIAGONAL_SOLVE)
+    rocsparse_diagonal_mode get_diagonal_mode() const;
+    void                    set_diagonal_mode(rocsparse_diagonal_mode value);
+#endif
 
     float m_local_host_alpha_value[4];
 
