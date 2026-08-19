@@ -24,13 +24,9 @@ class Gfx1250HazardPassTest : public ::testing::Test {
    protected:
     std::array<int, 3> arch{12, 5, 0};
 
-    void runPass(Function& func) {
+    void runPass(Function& func, AsmCapsConfig& caps) {
         GemmTileConfig config;
         config.arch = arch;
-
-        // The pass's only gate; TensileLite forwards rocisa's archCaps here.
-        AsmCapsConfig caps;
-        caps.requiresXCntForVolatileVMEM = true;
 
         PassContext passCtx;
         passCtx.setGemmTileConfig(config);
@@ -52,9 +48,15 @@ st.func @smem_self_overlap() {
 }
 )";
     StinkyIRConverter converter(arch);
-    Function* func = converter.convertToFunction(irString);
+    Function* func = converter.convertToFunction(irString);    
     ASSERT_NE(func, nullptr);
-    EXPECT_DEATH(runPass(*func), "overwrites one of its own source registers");
+    // The pass's only gate; TensileLite forwards rocisa's archCaps here.
+    AsmCapsConfig caps;
+    caps.enableXnackReplay = true;
+    EXPECT_DEATH(runPass(*func, caps), "overwrites one of its own source registers");
+    // The pass's only gate; TensileLite forwards rocisa's archCaps here.
+    caps.enableXnackReplay = false;
+    runPass(*func, caps);
 }
 #endif
 

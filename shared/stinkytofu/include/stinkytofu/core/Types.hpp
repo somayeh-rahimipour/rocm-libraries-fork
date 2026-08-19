@@ -102,5 +102,10 @@ struct AsmCapsConfig {
     /// rocisa archCaps `RequiresXCntForVolatileVMEM`. False on the standalone
     /// path, which has no rocisa to ask; see Gfx1250HazardPass.
     bool requiresXCntForVolatileVMEM = false;
+
+    /// Enable XNACK replay protection for non-atomic VMEM/SMEM/FLAT without
+    /// requiring `RequiresXCntForVolatileVMEM`. Atomic Rule 4a drains are still
+    /// gated on `requiresXCntForVolatileVMEM`.
+    bool enableXnackReplay = false;
 };
 }  // namespace stinkytofu

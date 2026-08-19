@@ -230,8 +230,9 @@ class Gfx1250HazardPass : public Pass {
     }
 
     PreservedAnalyses run(Function& func, PassContext& passCtx, AnalysisManager& /*AM*/) override {
-        // Only run if `RequiresXCntForVolatileVMEM` is enabled.
-        if (!passCtx.getAsmCapsConfig().requiresXCntForVolatileVMEM) {
+        const auto& caps = passCtx.getAsmCapsConfig();
+        // Run if `RequiresXCntForVolatileVMEM` or `EnableXnackReplay` is set.
+        if (!caps.requiresXCntForVolatileVMEM && !caps.enableXnackReplay) {
             return preserveCFGAnalyses();
         }
 
@@ -239,7 +240,7 @@ class Gfx1250HazardPass : public Pass {
 
         const GfxArchID archId = getGfxArchID(arch[0], arch[1], arch[2]);
         auto profile = makeXcntDrainProfile(enableXcntDrainProfile);
-        runOnFunction(func, archId, *profile);
+        runOnFunction(func, archId, *profile, caps.requiresXCntForVolatileVMEM);
         profile->print();
         return preserveCFGAnalyses();
     }
@@ -261,7 +262,8 @@ class Gfx1250HazardPass : public Pass {
     // preserves replay sources and inserts required drains.
     static void applySingleGroupXnackReplayFix(BasicBlock& bb, BasicBlock::iterator it,
                                                AsmIRBuilder& builder, GfxArchID archId,
-                                               GroupState& state, XcntDrainProfileBase& profile) {
+                                               GroupState& state, XcntDrainProfileBase& profile,
+                                               bool requiresXCntForVolatileVMEM) {
         auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
         if (inst == nullptr || isPseudoInst(inst)) return;
 
@@ -342,7 +344,9 @@ class Gfx1250HazardPass : public Pass {
 
         // Rule 4(a): the first atomic after non-atomic memory must start
         // with XCNT == 0. This drain clears state before Rule 2 runs below.
-        const bool needsRule4aDrain = atomic && state.hasNonAtomic;
+        // Only enforced when `RequiresXCntForVolatileVMEM` is set; `EnableXnackReplay`
+        // alone does not protect atomics.
+        const bool needsRule4aDrain = requiresXCntForVolatileVMEM && atomic && state.hasNonAtomic;
         if (needsRule4aDrain) {
             insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::AtomicRule4a);
         }
@@ -380,7 +384,8 @@ class Gfx1250HazardPass : public Pass {
     }
 
    public:
-    static void runOnFunction(Function& func, GfxArchID archId, XcntDrainProfileBase& profile) {
+    static void runOnFunction(Function& func, GfxArchID archId, XcntDrainProfileBase& profile,
+                              bool requiresXCntForVolatileVMEM) {
         profile.beginFunction(func);
 
         GroupState state;
@@ -394,7 +399,8 @@ class Gfx1250HazardPass : public Pass {
 
             AsmIRBuilder builder(bb, archId);
             for (auto it = bb.begin(); it != bb.end(); ++it) {
-                applySingleGroupXnackReplayFix(bb, it, builder, archId, state, profile);
+                applySingleGroupXnackReplayFix(bb, it, builder, archId, state, profile,
+                                               requiresXCntForVolatileVMEM);
             }
             previous = &bb;
         }
@@ -419,14 +425,17 @@ class Gfx1250HazardModulePass : public ModulePass {
 
     PreservedAnalyses run(StinkyAsmModule& M, PassContext& passCtx,
                           ModuleAnalysisManager& /*MAM*/) override {
-        if (!passCtx.getAsmCapsConfig().requiresXCntForVolatileVMEM)
+        const auto& caps = passCtx.getAsmCapsConfig();
+        if (!caps.requiresXCntForVolatileVMEM && !caps.enableXnackReplay)
             return PreservedAnalyses::all();
 
         const auto arch = passCtx.getGemmTileConfig().arch;
         const GfxArchID archId = getGfxArchID(arch[0], arch[1], arch[2]);
         auto profile = makeXcntDrainProfile(enableXcntDrainProfile);
         for (Function* f : M.getFunctions())
-            if (f && !f->empty()) Gfx1250HazardPass::runOnFunction(*f, archId, *profile);
+            if (f && !f->empty())
+                Gfx1250HazardPass::runOnFunction(*f, archId, *profile,
+                                                 caps.requiresXCntForVolatileVMEM);
         profile->print();
         return PreservedAnalyses::all();
     }
