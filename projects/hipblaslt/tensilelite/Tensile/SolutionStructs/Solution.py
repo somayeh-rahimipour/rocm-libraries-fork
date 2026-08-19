@@ -255,18 +255,18 @@ def _validateStreamKMulticast(state, printRejectionReason, isaInfoMap):
 
   The cluster co-locates ClusterDim = [Cs, Ck] StreamK workgroups. On
   ForceDPOnly=1 both axes are spatial: Cs M-adjacent peers share B and Ck
-  N-adjacent peers share A. On ForceDPOnly=0 the Target A [Cs,Ck] case
-  uses the same 2-D spatial A+B multicast in the DP window (the SK tail
-  drops to ordinary loads). Sizes that are not a cluster multiple need no
-  build-time check: the launch rounds the grid up, the padded boundary
-  peers s_endpgm before the -3 cluster barrier, and the broadcast masks
-  are trimmed to the peers actually present.
+  N-adjacent peers share A. On ForceDPOnly=0, [Cs,Ck] uses that same 2-D
+  spatial A+B multicast in the DP window (the SK tail drops to ordinary
+  loads). Sizes that are not a cluster multiple need no build-time check:
+  the launch rounds the grid up, the padded boundary peers s_endpgm before
+  the -3 cluster barrier, and the broadcast masks are trimmed to the peers
+  actually present.
 
   The path is auto-derived from StreamK=3 + ClusterDim[0] > 1 plus either
   StreamKForceDPOnly=1 (spatial DP multicast) or ForceDPOnly=0 with
-  ClusterDim[1] > 1 (Target A 2-D DP multicast). ForceDPOnly=0 [Cs,1]
-  stays the existing non-multicast SK3 cluster. Cluster reduction (Ck > 1
-  on ForceDPOnly=0) is validated separately by _validateStreamKClusterReduction.
+  ClusterDim[1] > 1 (2-D DP multicast). ForceDPOnly=0 [Cs,1] stays the
+  existing non-multicast SK3 cluster. Cluster reduction (Ck > 1 on
+  ForceDPOnly=0) is validated separately by _validateStreamKClusterReduction.
   """
   if not streamKMulticast(state):
     return True
@@ -336,11 +336,11 @@ def _validateStreamKClusterReduction(state, printRejectionReason, isaInfoMap):
 
   ForceDPOnly=0 + ClusterDim[1] = Ck > 1 co-locates SK-partial peers in a
   workgroup cluster. Pure [1,C] reduces via the cluster split barrier on a
-  C-way K-split of every tile. Target A [Cs,Ck] uses the same cluster-barrier
+  Ck-way K-split of every tile. [Cs,Ck] uses the same cluster-barrier
   fixup on the SK tail after 2-D DP multicast (validated by
   _validateStreamKMulticast). itersPerTile % Ck == 0 is enforced at
   problem-select time by ClusterReductionIterCheck for pure [1,C] only
-  (problem K is not known at derive time). Target A uses standard two-tile
+  (problem K is not known at derive time). [Cs,Ck] uses standard two-tile
   SK accounting, so that even-K-split check does not apply.
   """
   if not streamKClusterReduction(state):
@@ -1901,8 +1901,8 @@ class Solution(collections.abc.Mapping):
         # A Y-extent > 1 is ClusterDim[1] = Ck. On ForceDPOnly=1 that is the
         # N-adjacent A-multicast axis, which only works when the launch spans
         # the real M x N tile space and both axes are > 1 (streamK2DMulticast).
-        # On ForceDPOnly=0 Ck is the SK-partial reduction axis ([1,C] pure
-        # reduction, or the Ck axis of Target A [Cs,Ck]); _validateStreamKClusterReduction
+        # On ForceDPOnly=0 Ck is the SK-partial reduction axis ([1,C] K-split,
+        # or the Ck axis of [Cs,Ck] DP multicast); _validateStreamKClusterReduction
         # owns that shape. A [1,Ck] cluster on ForceDPOnly=1 has no B-sharing
         # X peers and is not a multicast shape.
         if (state["ClusterDim"][1] != 1 and state["StreamKForceDPOnly"]

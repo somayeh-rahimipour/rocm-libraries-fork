@@ -2414,9 +2414,9 @@ class KernelWriterAssembly(KernelWriter):
     B-multicast) and Ck (Y/N, A-multicast), and the grid is rounded up to a
     ClusterDim multiple, so the same validX/validY reduction applies. Its padded
     peers early-exit in StreamK.streamKClusterPadEarlyExit, so the surviving
-    peers' ld_bcst must wait only on the present lanes. Target A (ForceDPOnly=0
-    [Cs,Ck]) launches the same 2-D M/N coords in DP, so the same reduction
-    applies. Pure [1,C] two-tile reduction is excluded: WorkGroup0 there is the
+    peers' ld_bcst must wait only on the present lanes. ForceDPOnly=0 [Cs,Ck]
+    launches the same 2-D M/N coords in DP, so the same reduction applies.
+    Pure [1,C] two-tile reduction is excluded: WorkGroup0 there is the
     linear K-fastest work index rather than an M-tile.
     """
     cx = kernel["ClusterDim"][0]

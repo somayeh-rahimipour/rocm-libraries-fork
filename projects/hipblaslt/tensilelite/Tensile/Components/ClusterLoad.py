@@ -139,7 +139,7 @@ class ClusterLoadTDM(ClusterLoad):
         maskB = (1 << kernel["ClusterDim"][0]) - 1
 
         # ForceDPOnly=0 pure [1,C] reduction: Ck is a K-split, not N-spatial
-        # A-multicast. Keep a placeholder self-bit A mask. Target A [Cs,Ck]
+        # A-multicast. Keep a placeholder self-bit A mask. ForceDPOnly=0 [Cs,Ck]
         # uses the dense 2-D A+B masks (Ck is N-spatial in DP).
         if streamKClusterReduction(kernel) and not streamK2DMulticast(kernel):
             maskA = 1

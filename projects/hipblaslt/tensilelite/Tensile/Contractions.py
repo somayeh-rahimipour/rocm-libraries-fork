@@ -539,7 +539,7 @@ class ProblemPredicate(Properties.Predicate):
 
         # ForceDPOnly=0 pure [1,C] cluster reduction: skip problems whose
         # itersPerTile is not a multiple of Ck (the split-barrier path assumes
-        # an even K-split of every tile). Target A [Cs,Ck] uses standard
+        # an even K-split of every tile). ForceDPOnly=0 [Cs,Ck] uses standard
         # two-tile SK accounting, so Ck is N-spatial in DP rather than a
         # per-tile K-split factor.
         if (state.get("StreamK", 0) == 3

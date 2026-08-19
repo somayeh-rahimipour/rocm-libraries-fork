@@ -1961,10 +1961,10 @@ namespace TensileLite
             else if(sizeMapping.streamK == 3 && sizeMapping.streamKForceDPOnly == 0
                     && sizeMapping.clusterDim.x > 1 && sizeMapping.clusterDim.y > 1)
             {
-                // Target A: persistent 2-D cluster grid [nWG0, gridY, batch].
-                // gridX is pinned to nWG0 so the kernel's DP fold
-                // StreamKIdx = WorkGroup1*nWG0 + WorkGroup0 keeps Cs X-peers
-                // M-adjacent (share B) and Ck Y-peers N-adjacent (share A).
+                // ForceDPOnly=0 [Cs,Ck]: persistent 2-D cluster grid
+                // [nWG0, gridY, batch]. gridX is pinned to nWG0 so the kernel's
+                // DP fold StreamKIdx = WorkGroup1*nWG0 + WorkGroup0 keeps Cs
+                // X-peers M-adjacent (share B) and Ck Y-peers N-adjacent (share A).
                 // gridY = sk.grid / nWG0 is a multiple of Ck (getSKGridImpl).
                 rv.numWorkGroups.x = problemNumGroupTiles.x; // nWG0
                 rv.numWorkGroups.y = problemNumGroupTiles.x > 0
@@ -2015,13 +2015,15 @@ namespace TensileLite
         // peers' broadcast masks are trimmed to the present lanes
         // (computeMulticastMaskReduction).
         //
-        // ForceDPOnly cluster multicast pads the M x N tile grid; Target A
-        // pads the persistent [nWG0, gridY] grid the same way; ForceDPOnly=0
-        // [1,C] pads the [skGrid/Ck, Ck] grid. All three have a kernel
-        // pad-exit before the -3 cluster barrier. A ForceDPOnly=0 [Cs,1]
-        // (non-multicast) Stream-K cluster keeps develop's 1-D sk.grid launch.
+        // ForceDPOnly cluster multicast pads the M x N tile grid;
+        // ForceDPOnly=0 [Cs,Ck] pads the persistent [nWG0, gridY] grid the
+        // same way; ForceDPOnly=0 [1,C] pads the [skGrid/Ck, Ck] grid. All
+        // three have a kernel pad-exit before the -3 cluster barrier. A
+        // ForceDPOnly=0 [Cs,1] (non-multicast) Stream-K cluster keeps
+        // the existing 1-D sk.grid launch.
         bool skClusterMulticast = sizeMapping.streamK != 0
                                   && sizeMapping.streamKForceDPOnly != 0 && enableCluster;
+        // ForceDPOnly=0 [Cs,Ck] both > 1: 2-D DP multicast + SK-tail reduction.
         bool skClusterDual2D    = sizeMapping.streamK == 3
                                   && sizeMapping.streamKForceDPOnly == 0
                                   && sizeMapping.clusterDim.x > 1
@@ -4508,7 +4510,7 @@ namespace TensileLite
                 skGrid    = ck * tiles;
             }
 
-            // Target A: SK3 ForceDPOnly=0 [Cs,Ck] both > 1. Reshape the origami /
+            // StreamK ForceDPOnly=0 [Cs,Ck] both > 1: reshape the origami /
             // CU-budget skGrid into a persistent 2-D cluster grid [nWG0, gridY]
             // so DP multicast is spatial (Cs M-adjacent, Ck N-adjacent) while a
             // genuine SK remainder remains whenever nWG1 % gridY != 0.

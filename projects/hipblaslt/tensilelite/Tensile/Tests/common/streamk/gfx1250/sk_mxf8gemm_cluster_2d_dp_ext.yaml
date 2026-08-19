@@ -23,7 +23,7 @@ GlobalParameters:
 
 BenchmarkProblems:
   #######################################
-  # TN - StreamK=3, ForceDPOnly=0, Target A ClusterDim [Cs, Ck], MXF8.
+  # TN - StreamK=3, ForceDPOnly=0, ClusterDim [Cs, Ck], MXF8.
   # 2-D A+B multicast in the DP window, ordinary SK-tail loads, cluster-barrier
   # reduction of SK partials. MatrixInstruction matches
   # sk_mxf8_force_dp_only_cluster_multicast_ext.yaml (no [8,8,2,2]: MT256 F8

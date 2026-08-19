@@ -23,7 +23,7 @@ GlobalParameters:
 
 BenchmarkProblems:
   #######################################
-  # TN - StreamK=3, ForceDPOnly=0, Target A ClusterDim [Cs, Ck]:
+  # TN - StreamK=3, ForceDPOnly=0, ClusterDim [Cs, Ck]:
   # 2-D A+B multicast in the DP window (Cs M-adjacent B, Ck N-adjacent A),
   # ordinary SK-tail loads, cluster-barrier reduction of SK partials.
   # ClusterDim [2,2]/[2,4]/[4,2] matches the 2-D set of

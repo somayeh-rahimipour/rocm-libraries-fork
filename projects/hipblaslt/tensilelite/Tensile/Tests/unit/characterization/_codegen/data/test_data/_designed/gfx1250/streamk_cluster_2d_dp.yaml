@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
-# gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] Target A cluster
+# gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2]
 # (2-D A+B multicast in DP, cluster-barrier reduction on the SK tail).
 GlobalParameters:
   SyncsPerBenchmark: 0
