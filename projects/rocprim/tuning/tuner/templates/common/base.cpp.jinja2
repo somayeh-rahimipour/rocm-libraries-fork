@@ -42,6 +42,9 @@ extern "C" float {{algo_type}}_{{algo_name}}_wrapper(
     settings.json_out = "/dev/null";
     settings.size = bytes_size;
     settings.skip_header = true;
+    {% if dry %}
+    settings.dry = true;
+    {% endif %}
     {% endblock %}
 
     {% block primbench_args %}
@@ -55,7 +58,10 @@ extern "C" float {{algo_type}}_{{algo_name}}_wrapper(
     executor.queue<benchmark_type>();
     executor.run();
 
-    // Return the time as milliseconds per GiB.
+    {% if dry %}
+    return 1.0f;
+    {% else %}
     return (1000 * primbench::GiB) / executor.get_last_bytes_per_second();
+    {% endif %}
 }
 {% endblock %}

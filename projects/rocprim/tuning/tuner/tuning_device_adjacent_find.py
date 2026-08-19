@@ -40,11 +40,13 @@ MIN_IPT = 4
 MAX_IPT = 32
 IPT_INC = 4
 
+FIRST_ADJ_POS_DECIMAL = [1, 5, 9]
+
 
 class Tuner(BaseTuner):
     @classmethod
     def _get_default_args(cls) -> TunerArgs:
-        return TunerArgs(algo_full_name='device_adjacent_difference')
+        return TunerArgs(algo_full_name='device_adjacent_find')
 
     def __init__(self, args: TunerArgs) -> None:
         super().__init__(args)
@@ -53,6 +55,7 @@ class Tuner(BaseTuner):
         params = OrderedDict()
         params['block_size_x'] = list(range(MIN_BLOCK_SIZE_X, MAX_BLOCK_SIZE_X + 1, BLOCK_SIZE_INC))
         params['__ipt__'] = STARTING_IPT + list(range(MIN_IPT, MAX_IPT + 1, IPT_INC))
+        params['FAPD'] = FIRST_ADJ_POS_DECIMAL
         return params
 
     def _get_restrictions(

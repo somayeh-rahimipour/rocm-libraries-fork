@@ -137,6 +137,10 @@ class TunerArgs:
     seed: int = -1
     arch_name: Optional[str] = None
 
+    dry: bool = False
+    """Whether to do a dry run: compile every config and skip GPU execution.
+    Real cache/output files are left untouched."""
+
     def update_with_kwargs(self, **kwargs):
         for k, v in kwargs.items():
             if k in self.__dict__.keys() and not v is None:
@@ -178,6 +182,7 @@ class BaseTuner(ABC):
         self.save_metadata = args.save_metadata
         self.strategy = args.strategy
         self.seed = None if args.seed == -1 else args.seed
+        self.dry = args.dry
 
         if not self.exclude_default_config:
             with open(
@@ -345,6 +350,15 @@ class BaseTuner(ABC):
             tune_kernel_args = self._get_base_tune_kernel_args(key_type, value_type)
             # Run main tuning
             results, _ = kernel_tuner.tune_kernel(**tune_kernel_args)
+
+            if self.dry:
+                # A dry run only validates that every config compiles; there are
+                # no real timings to save and the default-config path would run
+                # on the GPU, so stop here.
+                print(f"Dry run complete for {key_type} {value_type if value_type else ''}: "
+                      f"all configurations compiled.")
+                return
+
             # Run default config if enabled
             self._run_default_config(tune_kernel_args, key_type, value_type)
 
@@ -380,6 +394,7 @@ class BaseTuner(ABC):
             "config": dict(zip(tune_params.keys(), tune_params.keys())),
             "key_type": key_type,
             "value_type": value_type,
+            "dry": self.dry,
         }
 
         content = template.render(**context)
@@ -424,6 +439,12 @@ class BaseTuner(ABC):
 
         if self.strategy != "brute_force":
             tune_kernel_args["strategy_options"] = {"max_fevals": self.max_fevals}
+
+        if self.dry:
+            # Route the cache to a throwaway file so placeholder dry-run timings
+            # never get read back by a later real tuning run.
+            dry_cache = self.output_dir / f"dry_{self._get_cache_file_name(key_type, value_type)}"
+            tune_kernel_args["cache"] = str(dry_cache)
 
         return tune_kernel_args
 

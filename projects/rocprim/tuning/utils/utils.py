@@ -91,6 +91,12 @@ class Parser:
             default=-1,
             help=f"The initial seed to generate the input data with",
         )
+        parser.add_argument(
+            "--dry",
+            action="store_true",
+            default=False,
+            help=f"Do a dry run of the tuning",
+        )
         return parser
 
 

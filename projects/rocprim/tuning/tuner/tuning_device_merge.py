@@ -42,7 +42,7 @@ class Tuner(BaseTuner):
         Each parameter maps to a list of valid values to explore during tuning."""
         params = OrderedDict()
         params["block_size_x"] = list(range(64, 1025, 64))
-        params["ipt"] = [1, 2] + list(range(4, 33, 4))
+        params["__ipt__"] = [1, 2] + list(range(4, 33, 4))
         return params
 
     def _get_restrictions(
@@ -56,7 +56,7 @@ class Tuner(BaseTuner):
 
         def validate(params):
             block_size = params["block_size_x"]
-            ipt = params["ipt"]
+            ipt = params["__ipt__"]
 
             # Total size constraint
             if block_size * ipt > size:
