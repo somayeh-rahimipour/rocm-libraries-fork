@@ -10,7 +10,7 @@ Documentation for rocSPARSE is available at
 * Added the `rocsparse_dnvec_descr_create_scalar` auxiliary routine, which creates a size-one dense vector descriptor for a host or device scalar.
 * Added batched support to the SpMM algorithm `rocsparse_spmm_alg_csr_nnz_split` and `rocsparse_spmm_alg_csr_merge_path`.
 * Added `rocsparse_sddmm` batched support to CSR, CSC, COO, COO AoS, and ELL formats.
-* Added the `rocsparse_diagonal_mode` enum and the `rocsparse_sptrsv_input_diagonal_mode` / `rocsparse_sptrsm_input_diagonal_mode` set-input values, which make `rocsparse_sptrsv` and `rocsparse_sptrsm` run a diagonal-only backsolve (`y = alpha * x / D`, or `y = alpha * x / |D|` in absolute mode) that reuses the diagonal offsets collected during analysis, instead of a triangular solve. This is intended for the diagonal step of an incomplete LDL^H solve; the absolute mode yields the SPD operator L|D|L^H. The CSR and CSC formats are supported.
+* Added the `rocsparse_diagonal_mode` enum and the `rocsparse_sptrsv_input_diagonal_mode` / `rocsparse_sptrsm_input_diagonal_mode` set-input values, which make `rocsparse_sptrsv` and `rocsparse_sptrsm` run a diagonal-only solve. The CSR and CSC formats are supported.
 
 ### Optimized
 * Optimized architecture-aware launch configurations for RDNA (wave32) and CDNA (wave64) GPUs, improving performance and performance portability for several sparse level 2 and level 3 routines without algorithmic or numerical changes. Affected routines include `rocsparse_spmv` for the CSR adaptive, nnz-split, and LRB algorithms, the COO (SoA and AoS) formats, and the ELL format (`rocsparse_Xellmv`); `rocsparse_Xbsrmv`; `rocsparse_Xbsrxmv`; `rocsparse_Xgemvi`; `rocsparse_Xgemmi`; and `rocsparse_spmm` with the blocked-ELL format.
