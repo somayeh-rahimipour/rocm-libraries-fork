@@ -65,7 +65,8 @@ def import_module_from_file(file_path: str, module_name: str) -> Optional[Module
 def get_available_algorithms() -> List[str]:
     """Return list of supported tuning algorithms."""
     return [
-        "device_merge"
+        "device_merge",
+        "device_batch_memcpy",
         # Add new algorithms here
     ]
 

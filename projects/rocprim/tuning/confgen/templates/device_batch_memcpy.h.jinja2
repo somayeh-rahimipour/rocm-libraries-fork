@@ -1,0 +1,25 @@
+{% extends "common/base.h.jinja2" %}
+
+{# batch_memcpy is a single-type primitive selected purely by sizeof(value_type)
+   (batch_memcpy_config_selector<value_type, IsMemCpy>), so the picker takes only
+   `value_type` and the guards are sizeof-only (no floating-point distinction). #}
+
+{% block target_tparams %}
+template<class Target, class value_type>
+{% endblock %}
+
+{% block config_guard scoped %}(sizeof(value_type) <= {{ type.key_type.size }}){% if type.key_type.size_min > 0 %} && (sizeof(value_type) > {{ type.key_type.size_min }}){% endif %}{% endblock %}
+
+{% block config_constructor -%}
+batch_memcpy_config_params{
+            { {{ config.TUNE_NON_BLEV_BLOCK_SIZE }}, {{ config.TUNE_NON_BLEV_IPT }} },
+            {{ config.TUNE_TLEV_IPT }},
+            { {{ config.TUNE_BLEV_BLOCK_SIZE }}, {{ config.TUNE_BLEV_IPT }} },
+            {{ config.TUNE_WLEV_THRESHOLD }},
+            {{ config.TUNE_BLEV_THRESHOLD }}
+        }
+{%- endblock %}
+
+{% block config_base_type -%}
+batch_memcpy_config_params_base<value_type>
+{%- endblock %}

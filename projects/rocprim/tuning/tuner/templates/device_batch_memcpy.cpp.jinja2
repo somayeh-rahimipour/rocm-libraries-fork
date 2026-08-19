@@ -1,0 +1,30 @@
+{% extends "common/base.cpp.jinja2" %}
+{% block config_constructor -%}
+rocprim::batch_memcpy_config<{{ config.TUNE_NON_BLEV_BLOCK_SIZE }},
+                             {{ config.TUNE_NON_BLEV_IPT }},
+                             {{ config.TUNE_TLEV_IPT }},
+                             {{ config.TUNE_BLEV_BLOCK_SIZE }},
+                             {{ config.TUNE_BLEV_IPT }},
+                             {{ config.TUNE_WLEV_THRESHOLD }},
+                             {{ config.TUNE_BLEV_THRESHOLD }}>
+{%- endblock %}
+{# batch_memcpy is not parameterized by a rocprim key_type; the element type is
+   custom_aligned_type<ItemSize, ItemAlignment>, fixed per scenario below. #}
+{% block type_definitions %}
+{% endblock %}
+{% block benchmark_type %}
+using base_t = device_batch_memcpy_benchmark<{{ config.TUNE_ITEM_SIZE }},
+                                             {{ config.TUNE_ITEM_ALIGN }},
+                                             uint32_t,
+                                             true,
+                                             {{ config.TUNE_NUM_TLEV }},
+                                             {{ config.TUNE_NUM_WLEV }},
+                                             {{ config.TUNE_NUM_BLEV }},
+                                             config>;
+// The benchmark requires a subalgo string at construction, but executor.queue<>()
+// default-constructs, so wrap it with a default ctor that pins the subalgo.
+struct benchmark_type : base_t
+{
+    benchmark_type() : base_t("batch_memcpy") {}
+};
+{% endblock %}

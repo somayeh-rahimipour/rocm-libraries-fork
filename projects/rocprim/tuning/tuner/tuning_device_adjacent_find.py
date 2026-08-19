@@ -62,9 +62,6 @@ class Tuner(BaseTuner):
     def _get_restrictions(
         self, value_type: str, _: Optional[str] = None
     ) -> Callable[[dict], bool]:
-        # The base tuner always calls _get_restrictions(key_type, value_type).
-        # Adjacent difference is single-type, so the element type arrives in the
-        # first positional slot and the second is always None.
         size = self.bytes_size // TYPE_CONFIGS[value_type].size
         element_size = TYPE_CONFIGS[value_type].size
 
