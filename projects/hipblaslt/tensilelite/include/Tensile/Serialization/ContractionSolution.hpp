@@ -239,6 +239,10 @@ namespace TensileLite
                 iot::mapOptional(io, "dquantType", s.dquantType);
                 iot::mapOptional(io, "useDeepseekScaleA", s.useDeepseekScaleA);
                 iot::mapOptional(io, "useDeepseekScaleB", s.useDeepseekScaleB);
+                iot::mapOptional(io, "deepseekScaleAq0", s.deepseekScaleAq0);
+                iot::mapOptional(io, "deepseekScaleAq1", s.deepseekScaleAq1);
+                iot::mapOptional(io, "deepseekScaleBq0", s.deepseekScaleBq0);
+                iot::mapOptional(io, "deepseekScaleBq1", s.deepseekScaleBq1);
             }
 
             const static bool flow = false;

@@ -227,6 +227,26 @@ def _validateSubtileGRKPartition(state, printRejectionReason):
   return True
 
 
+def _validateSubtileMXWaveGroup(state, printRejectionReason):
+  # The MX-scaled subtile GEMM computes wrong accumulators when MIWaveGroup[0]
+  # exceeds 2; see epilogues/mxfp8_scaled_wg4x1_base_gemm_bug.md.
+  if not state["UseSubtileImpl"]:
+    return True
+  if tuple(state["ISA"]) != (9, 5, 0):
+    return True
+  pt = state["ProblemType"]
+  if not (pt["MXBlockA"] or pt["MXBlockB"]):
+    return True
+  if state["MIWaveGroup"][0] > 2:
+    reject(state, printRejectionReason,
+           "unsupported MIWaveGroup[0]=%d > 2 for MX-scaled subtile GEMM "
+           "(base-GEMM codegen bug, see "
+           "epilogues/mxfp8_scaled_wg4x1_base_gemm_bug.md)"
+           % state["MIWaveGroup"][0])
+    return False
+  return True
+
+
 def _validateSubtileEpiloguePrereqs(state, printRejectionReason, epilogueName):
   """Validate the shared prerequisites for the Subtile fused epilogues.
 
@@ -381,7 +401,7 @@ def _resolveDQuantSize(state, printRejectionReason, label):
              f"Q0 <= rowsPerLane={rowsPerLane} and Q0 divides rowsPerLane")
       return False
   mfmaN = state["MatrixInstN"]
-  if q1 < mfmaN:
+  if q1 < mfmaN and q1 != 1:
     reject(state, printRejectionReason,
            f"{label} Q1={q1} must be >= MatrixInstN={mfmaN} (sub-mfma column quantization not supported)")
     return False
@@ -1465,7 +1485,13 @@ class Solution(collections.abc.Mapping):
       # number of K-subtiles per depth-U iteration: 1 for fp8 (AB_B8, subtileShape K=1),
       # 2 for fp4/bf16 (AB_B4/AB_B16, subtileShape K=2).
       dtype_a = state["ProblemType"]["DataTypeA"]
-      numSubIterK = 1 if dtype_a.is8bitFloat() else 2
+      # fp8 data tile packs 1 K-subtile per DepthU iteration, but MX scale inputs add a
+      # scale LR tile that packs 2 K-subtiles, and fp8 HostPreSwizzle multi-DU halves the
+      # data DepthU — so MX-scaled fp8 needs the same 2 * MatrixInstK DepthU unit as
+      # fp4/bf16. Without this, MX-scaled fp8 at DepthU=128 reaches codegen with a
+      # zero-sized K grid (ZeroDivisionError in Subtile/Kernel.py).
+      usesMXScale = state["ProblemType"]["MXBlockA"] or state["ProblemType"]["MXBlockB"]
+      numSubIterK = 1 if (dtype_a.is8bitFloat() and not usesMXScale) else 2
       duUnit = numSubIterK * state["MatrixInstK"] * state["LocalSplitU"]
       if state["DepthU"] == -1:
         state["DepthU"] = duUnit
@@ -3581,6 +3607,9 @@ class Solution(collections.abc.Mapping):
       # Runs here (not earlier) because it needs MacroTileA/B and _DepthUA/B,
       # which TileInfo reads and which are only set by this point.
       if not _validateSubtileGRKPartition(state, printRejectionReason):
+        return
+
+      if not _validateSubtileMXWaveGroup(state, printRejectionReason):
         return
 
       # fp6 doesn't support LDS padding yet.
@@ -6049,15 +6078,15 @@ class Solution(collections.abc.Mapping):
     # scratch so the emitter's LDS writes are provably within the reserved
     # region (freed at the epilogue).  The existing MaxLDS reject below then
     # catches any device overflow.
-    if state.get("PartialRMS") and state["MIWaveGroup"][1] > 1:
+    if state.get("PartialRMS") and state["MIWaveGroup"][0] > 1:
       wg = state["MIWaveGroup"]
-      # Use mma_n (MT1-derived) to match the emitter's numPartials in
-      # SubtilePartialRMSEmit.py, not mma_m (MT0-derived) which over-reserves
-      # for wide-MT0 tiles.
-      mma_n_prms    = (state["MacroTile1"] // state["MatrixInstN"]) // wg[1]
-      rows_per_lane = (state["MatrixInstM"] * state["MatrixInstN"]) // state["WavefrontSize"]
-      num_rows_prms = mma_n_prms * rows_per_lane
-      partialRMSLdsBytes = wg[0] * wg[1] * state["WavefrontSize"] * num_rows_prms * 4
+      # Cross-wave scratch must match the emitter (SubtilePartialRMSEmit.py):
+      # it runs when wg_m = MIWaveGroup[0] > 1 and stores numPartials = mma_n
+      # dwords per lane, over wg_m*wg_n waves. rows_per_lane is already folded
+      # into the per-lane partial sums before the LDS stage, so it must not
+      # appear here. This mirrors the early check in _validatePartialRMS.
+      mma_n_prms         = (state["MacroTile1"] // state["MatrixInstN"]) // wg[1]
+      partialRMSLdsBytes = wg[0] * wg[1] * state["WavefrontSize"] * mma_n_prms * 4
       state["LdsNumBytes"] = max(state["LdsNumBytes"], partialRMSLdsBytes)
 
     ldsSize = state["LdsNumBytes"]

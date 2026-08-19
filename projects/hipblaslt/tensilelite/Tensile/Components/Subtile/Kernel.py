@@ -482,6 +482,10 @@ class TileInfo:
 
       # Derived byte-counts for emit logic
       self.depthUBytes   = int(self.depthU * geometry.bpe)
+      assert self.localSubtileGrid[1] > 0, (
+        "subtile K grid is zero for tc=%s (depthU=%d, mmaTileShape=%s); "
+        "MX-scaled fp8 subtile requires DepthU >= 2 * MatrixInstK, filter upstream in Solution.py"
+        % (self.tc, self.depthU, self.mmaTileShape))
       self.subIterKBytes = self.depthUBytes // self.localSubtileGrid[1]
       # TDM path. We apply 16 Bytes padding to each row.
       # TDM only exists on gfx1250, which is never swizzled (gfx950-only).

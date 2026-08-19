@@ -2564,13 +2564,15 @@ namespace TensileLite
 
                     uint8_t* mxPtr = static_cast<uint8_t*>(inputs.mxScale);
 
-                    size_t M      = static_cast<size_t>(d.sizes()[0]);
-                    size_t N      = static_cast<size_t>(d.sizes()[1]);
+                    size_t M = static_cast<size_t>(d.sizes()[0]);
+                    size_t N = static_cast<size_t>(d.sizes()[1]);
+                    // mTiles = kblock tiles (N_hidden/32), nTiles = free tiles (M_tokens).
                     size_t mTiles = (M + static_cast<size_t>(q0) - 1) / static_cast<size_t>(q0);
                     size_t nTiles = (N + static_cast<size_t>(q1) - 1) / static_cast<size_t>(q1);
 
-                    size_t paddedRows = ((mTiles + 31) / 32) * 32;
-                    size_t paddedCols = ((nTiles + 7) / 8) * 8;
+                    // Scale grid: rows = free dim (M_tokens, nTiles), cols = kblock dim (mTiles).
+                    size_t paddedRows = ((nTiles + 31) / 32) * 32;
+                    size_t paddedCols = ((mTiles +  7) /  8) *  8;
                     size_t colBlocks  = paddedCols / 8;
                     std::memset(mxPtr, 0, paddedRows * paddedCols * sizeof(uint8_t));
 
@@ -2585,9 +2587,10 @@ namespace TensileLite
 
                     omp_set_num_threads(MAX_OMP_THREADS);
 #pragma omp parallel for schedule(dynamic) collapse(2)
-                    for(size_t ti = 0; ti < mTiles; ++ti)
+                    // Outer: tj over M_tokens (free), inner: ti over N_hidden/32 (kblock).
+                    for(size_t tj = 0; tj < nTiles; ++tj)
                     {
-                        for(size_t tj = 0; tj < nTiles; ++tj)
+                        for(size_t ti = 0; ti < mTiles; ++ti)
                         {
                             size_t mLo = ti * static_cast<size_t>(q0);
                             size_t mHi = std::min(mLo + static_cast<size_t>(q0), M);
@@ -2654,12 +2657,13 @@ namespace TensileLite
                                 uint32_t qbits = static_cast<uint32_t>(qExp) << 23;
                                 std::memcpy(&quantMult, &qbits, sizeof(quantMult));
                             }
-                            size_t d0 = ti >> 5;
-                            size_t d1 = (ti >> 4) & 1;
-                            size_t d2 = ti & 0xF;
-                            size_t d3 = tj >> 3;
-                            size_t d4 = (tj >> 2) & 1;
-                            size_t d5 = tj & 0x3;
+                            // Swizzle: d0..d2 from tj (free/M_tokens row), d3..d5 from ti (kblock col).
+                            size_t d0 = tj >> 5;
+                            size_t d1 = (tj >> 4) & 1;
+                            size_t d2 = tj & 0xF;
+                            size_t d3 = ti >> 3;
+                            size_t d4 = (ti >> 2) & 1;
+                            size_t d5 = ti & 0x3;
                             size_t swzOff = d0 * (colBlocks * 256) + d3 * 256
                                             + d5 * 64 + d2 * 4 + d4 * 2 + d1;
                             mxPtr[swzOff] = scaleByte;

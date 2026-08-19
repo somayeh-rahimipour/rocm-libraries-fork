@@ -518,11 +518,14 @@ namespace TensileLite
                                     size_t mPadded  = ((mTokens  + static_cast<size_t>(mt1) - 1) / static_cast<size_t>(mt1)) * static_cast<size_t>(mt1);
                                     size_t nTilesN  = (nHidden   + static_cast<size_t>(mt0) - 1) / static_cast<size_t>(mt0);
 
-                                    // Use the A-input dtype for gamma and residual buffers.
                                     rocisa::DataType inputType = rv.back().a().dataType();
                                     rv.back().setPartialRMSMT0(mt0);
                                     rv.back().setPartialRMSMT1(mt1);
-                                    rv.back().setRMSGamma(inputType, nHidden);
+                                    // Gamma is always bf16 by the hipBLASLt API contract,
+                                    // independent of the GEMM input dtype (the kernel reads it
+                                    // as bf16). Allocating it as the input dtype corrupts the
+                                    // gamma load for non-bf16 inputs (e.g. fp8).
+                                    rv.back().setRMSGamma(rocisa::DataType::BFloat16, nHidden);
                                     rv.back().setPartialRMSQuant(m_partialRMSQuant);
                                     // Double the row count so both halves fit: first half = Σx²,
                                     // second half = amax(|D|)/448.
@@ -543,7 +546,7 @@ namespace TensileLite
                                     rv.back().setDquantSize0(q0);
                                     rv.back().setDquantSize1(q1);
                                     rv.back().setQuantScale((M + q0 - 1) / q0, (N + q1 - 1) / q1);
-                                    rv.back().setMxScale((M + q0 - 1) / q0, (N + q1 - 1) / q1);
+                                    rv.back().setMxScale((N + q1 - 1) / q1, (M + q0 - 1) / q0);
                                 }
                                 if(m_useDeepseekScaleA)
                                 {

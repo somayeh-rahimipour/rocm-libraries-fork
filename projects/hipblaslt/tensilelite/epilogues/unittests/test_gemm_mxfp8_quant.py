@@ -82,8 +82,10 @@ def _build_kernel_args(solution, M, K, nHidden, q0, q1, alpha=1.0, zeroInput=Fal
 
     mT = math.ceil(nHidden / q0)
     nT = math.ceil(M / q1)
-    paddedRows = ((mT + 31) // 32) * 32
-    paddedCols = ((nT + 7) // 8) * 8
+    # Free dim (nT = M_tokens) padded to ×32; kblock dim (mT = N_hidden/q0) padded to ×8.
+    # Matches the (nT, mT) grid passed to swizzleMxScaleGfx950 in the q0=32 path.
+    paddedRows = ((nT + 31) // 32) * 32
+    paddedCols = ((mT + 7) // 8) * 8
     # MXScale: GFX950 pre-swizzled, flat uint8 [paddedRows*paddedCols].
     mxScale = np.zeros(paddedRows * paddedCols, dtype=np.uint8)
 

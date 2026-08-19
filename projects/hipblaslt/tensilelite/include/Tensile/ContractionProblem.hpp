@@ -821,13 +821,13 @@ namespace TensileLite
             }
         }
 
-        void setMxScale(size_t mTiles, size_t nTiles)
+        void setMxScale(size_t freeTiles, size_t kBlockTiles)
         {
             if(m_dquantType == DQuantType::MXFP8)
             {
-                // GFX950 pre-swizzled layout: rows padded to multiple of 32, cols to multiple of 8.
-                size_t paddedRows = ((mTiles + 31) / 32) * 32;
-                size_t paddedCols = ((nTiles + 7) / 8) * 8;
+                // rows = free dim (M_tokens), padded to ×32; cols = kblock dim (N_hidden/32), padded to ×8.
+                size_t paddedRows = ((freeTiles   + 31) / 32) * 32;
+                size_t paddedCols = ((kBlockTiles +  7) /  8) *  8;
                 m_tensors[TENSOR::MXSCALE]
                     = {"mxScale", rocisa::DataType::E8, {paddedRows, paddedCols}, {paddedCols, 1}};
                 m_tensors[TENSOR::MXSCALE].setAsOutput(true);

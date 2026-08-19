@@ -884,6 +884,10 @@ class SubtileMXFP8QuantEmitter(SubtileDynamicQuant):
                          q0Key="_DQuantSize0", q1Key="_DQuantSize1",
                          name="MXFP8Quant", tagPrefix="mx",
                          scaleSgprName="MXScale", scaleLabel="mxScale")
+        self.subColQuant = self.q1 < self.mfmaN and not self.subRowQuant
+        if self.subColQuant:
+            self.streamGroup    = 4
+            self.tilesPerBlockM = self.q0 // self.mfmaM
 
     def _computeCeilAdj(self, module, scaleFV: int, adjV: int) -> None:
         """Compute ceil adjustment (0 or 1) from scaleFV mantissa into adjV.
@@ -1231,6 +1235,190 @@ class SubtileMXFP8QuantEmitter(SubtileDynamicQuant):
             self.writer.vgprPool.checkIn(r)
         return module
 
+    def _subColPositions(self, module, n: int, qi: int, col: int, waveM, waveN):
+        """Compute per-lane freeV (M_token global position) and uniform kblkV (N_hidden/q0 block).
+
+        freeV = WG1*MT1 + waveN*waveSpanN + n*mfmaN + col  (per-lane via col).
+        kblkV = WG0*(nQTilesM*wgM) + waveM*nQTilesM + qi  (uniform across lanes).
+        Both returned as VGPR indices; caller must checkIn both after use.
+        """
+        waveSpanN = self.mmaN * self.mfmaN
+        freeV = self.writer.vgprPool.checkOut(1, tag="mx_scFreeV")
+        self._mulVgprBySgprConst(module, freeV, "WorkGroup1", self.macroTile1,
+                                  "WG1 * MT1.")
+        if waveN is not None:
+            tmp = self.writer.vgprPool.checkOut(1, tag="mx_scFreeVTmp")
+            module.add(VMulLOU32(dst=vgpr(tmp), src0=vgpr(waveN), src1=waveSpanN,
+                                 comment=f"waveN * waveSpanN={waveSpanN}."))
+            module.add(VAddU32(vgpr(freeV), vgpr(freeV), vgpr(tmp),
+                               comment="+ waveN * waveSpanN."))
+            self.writer.vgprPool.checkIn(tmp)
+        nOff = n * self.mfmaN
+        if 0 < nOff <= 64:
+            module.add(VAddU32(vgpr(freeV), vgpr(freeV), nOff, comment=f"+ n*mfmaN={nOff}."))
+        elif nOff > 64:
+            tmpN = self.writer.vgprPool.checkOut(1, tag="mx_scNOff")
+            module.add(VMovB32(dst=vgpr(tmpN), src=nOff, comment=f"n*mfmaN={nOff}."))
+            module.add(VAddU32(vgpr(freeV), vgpr(freeV), vgpr(tmpN), comment="+ n*mfmaN."))
+            self.writer.vgprPool.checkIn(tmpN)
+        module.add(VAddU32(vgpr(freeV), vgpr(freeV), vgpr(col), comment="+ col (per-lane)."))
+        kblkV = self.writer.vgprPool.checkOut(1, tag="mx_scKblkV")
+        nQTilesMPerWG = self.nQTilesM * self.wgM
+        self._mulVgprBySgprConst(module, kblkV, "WorkGroup0", nQTilesMPerWG,
+                                  f"WG0 * {nQTilesMPerWG} (nQTilesM*wgM).")
+        if waveM is not None:
+            tmp = self.writer.vgprPool.checkOut(1, tag="mx_scKblkTmp")
+            module.add(VMulLOU32(dst=vgpr(tmp), src0=vgpr(waveM), src1=self.nQTilesM,
+                                 comment=f"waveM * nQTilesM={self.nQTilesM}."))
+            module.add(VAddU32(vgpr(kblkV), vgpr(kblkV), vgpr(tmp),
+                               comment="+ waveM * nQTilesM."))
+            self.writer.vgprPool.checkIn(tmp)
+        if qi:
+            module.add(VAddU32(vgpr(kblkV), vgpr(kblkV), qi, comment=f"+ qi={qi}."))
+        return freeV, kblkV
+
+    def _buildSubColWriteMask(self, module, rowGroup: int, freeV: int, kblkV: int,
+                               totalFree: int, totalKBlocks: int, laneMask: int) -> None:
+        """Build write mask: rowGroup==0 AND freeV<totalFree AND kblkV<totalKBlocks.
+
+        Must be called before _swizzleTileByteOffset because that call overwrites freeV.
+        """
+        lsc = self.laneSgprCount
+        rgCond = self.writer.sgprPool.checkOutAligned(lsc, lsc, tag="mx_scRgCond",
+                                                       preventOverflow=False)
+        module.add(VCmpEQU32(dst=sgpr(rgCond, lsc), src0=0, src1=vgpr(rowGroup),
+                             comment="rowGroup == 0?."))
+        freeInRange = self.writer.sgprPool.checkOutAligned(lsc, lsc, tag="mx_scFreeIR",
+                                                            preventOverflow=False)
+        module.add(VCmpLtU32(dst=sgpr(freeInRange, lsc), src0=vgpr(freeV),
+                             src1=vgpr(totalFree), comment="freeV < totalFree?."))
+        module.add(SAndB64(dst=sgpr(laneMask, lsc), src0=sgpr(rgCond, lsc),
+                           src1=sgpr(freeInRange, lsc),
+                           comment="mask = rowGroup==0 AND freeV<totalFree."))
+        self.writer.sgprPool.checkIn(freeInRange)
+        self.writer.sgprPool.checkIn(rgCond)
+        kblkInRange = self.writer.sgprPool.checkOutAligned(lsc, lsc, tag="mx_scKblkIR",
+                                                            preventOverflow=False)
+        module.add(VCmpLtU32(dst=sgpr(kblkInRange, lsc), src0=vgpr(kblkV),
+                             src1=vgpr(totalKBlocks), comment="kblkV < totalKBlocks?."))
+        module.add(SAndB64(dst=sgpr(laneMask, lsc), src0=sgpr(laneMask, lsc),
+                           src1=sgpr(kblkInRange, lsc), comment="AND kblkV in range."))
+        self.writer.sgprPool.checkIn(kblkInRange)
+
+    def _streamSubCol(self, vgprTiles, mxSrd: int, laneId: int, col: int,
+                       rowGroup: int, savedExec: int, laneMask: int) -> Module:
+        """Fused streaming loop for subColQuant (q0=32, q1=1).
+
+        Streams G=4 MFMA-N tiles at a time to keep peak VGPR usage at O(G) rather
+        than O(nQTilesN), preventing VGPR overflow for large N_hidden.
+        """
+        module = Module("MXFP8Quant streamSubCol")
+        module.addComment1("MXFP8Quant subColQuant: streaming loop (G=4 MFMA-N tiles).")
+        groupSize = self.streamGroup
+        lsc       = self.laneSgprCount
+        invFp8Bits = struct.unpack('<I', struct.pack('<f', 1.0 / _fp8E4m3Max))[0]
+        invFp8V = self.writer.vgprPool.checkOut(1, tag="mx_scInvFp8")
+        module.add(VMovB32(dst=vgpr(invFp8V), src=hex(invFp8Bits),
+                           comment=f"1/fp8_max = 1/{_fp8E4m3Max}."))
+        c254V = self.writer.vgprPool.checkOut(1, tag="mx_scC254")
+        module.add(VMovB32(dst=vgpr(c254V), src=254, comment="constant 254."))
+        zeroMask = self.writer.sgprPool.checkOutAligned(lsc, lsc, tag="mx_scZeroMask",
+                                                         preventOverflow=False)
+        absMask = self.writer.vgprPool.checkOut(1, tag="mx_scAbsMask")
+        module.add(VMovB32(dst=vgpr(absMask), src=hex(0x7FFFFFFF), comment="abs mask."))
+        accTmp = self.writer.vgprPool.checkOut(1, tag="mx_scAccTmp")
+        waveM, waveN = self._computeWaveIndices(module)
+        # Compute bounds once; reused across all (qi, nBase) groups.
+        totalFree = self.writer.vgprPool.checkOut(1, tag="mx_scTotalFree")
+        self._computeTotalQTilesN(module, totalFree)
+        totalKBlocks = self.writer.vgprPool.checkOut(1, tag="mx_scTotalKBlks")
+        self._computeTotalQTilesM(module, totalKBlocks)
+        for qi in range(self.nQTilesM):
+            mStart = qi * self.tilesPerBlockM
+            mEnd   = (qi + 1) * self.tilesPerBlockM
+            for nBase in range(0, self.mmaN, groupSize):
+                g = min(groupSize, self.mmaN - nBase)
+                # (1) Within-lane amax fold: tilesPerBlockM MFMA-M tiles × rowsPerLane elements.
+                amaxBase = self.writer.vgprPool.checkOut(g, tag=f"mx_scAmax_qi{qi}_n{nBase}")
+                for j in range(g):
+                    module.add(VMovB32(dst=vgpr(amaxBase + j), src=0,
+                                       comment=f"amax[j={j}] = 0."))
+                for j in range(g):
+                    n = nBase + j
+                    for m in range(mStart, mEnd):
+                        for k in range(self.rowsPerLane):
+                            self._readAccInto(module, accTmp, vgprTiles, m, n, k,
+                                              f"read acc[m={m},n={n},k={k}].")
+                            module.add(VAndB32(dst=vgpr(accTmp), src0=vgpr(accTmp),
+                                               src1=vgpr(absMask), comment="|acc|."))
+                            module.add(VMaxF32(dst=vgpr(amaxBase + j),
+                                               src0=vgpr(amaxBase + j),
+                                               src1=vgpr(accTmp),
+                                               comment=f"amax[j={j}] = max(amax, |acc|)."))
+                # (2) Cross-rowGroup butterfly: 2 rounds, no column rounds since q1=1.
+                addrBf = self.writer.vgprPool.checkOut(1, tag="mx_scBfAddr")
+                tmpBf  = self.writer.vgprPool.checkOut(g, tag="mx_scBfTmp")
+                for r in range(2):
+                    self._butterflyRound(module, addrBf, tmpBf, amaxBase, g, laneId,
+                                         self.mfmaN << r)
+                self.writer.vgprPool.checkIn(tmpBf)
+                self.writer.vgprPool.checkIn(addrBf)
+                # (3) Compute e8m0 quantMult for g slots.
+                qmulBase = self.writer.vgprPool.checkOut(g, tag=f"mx_scQmul_qi{qi}_n{nBase}")
+                for j in range(g):
+                    self._computeOneMXScale(module, j, amaxBase + j, qmulBase + j,
+                                            invFp8V, c254V, zeroMask)
+                # (4) Apply scale in-place for this group's accumulators.
+                for j in range(g):
+                    n = nBase + j
+                    for m in range(mStart, mEnd):
+                        for k in range(self.rowsPerLane):
+                            self._readAccInto(module, accTmp, vgprTiles, m, n, k,
+                                              f"read acc[m={m},n={n},k={k}].")
+                            module.add(VMulF32(dst=vgpr(accTmp), src0=vgpr(accTmp),
+                                               src1=vgpr(qmulBase + j),
+                                               comment=f"acc *= quantMult[j={j}]."))
+                            self._writeAccFrom(module, accTmp, vgprTiles, m, n, k,
+                                               f"write acc[m={m},n={n},k={k}].")
+                # (5) Store g scale bytes; freeV is overwritten by swizzle so mask is built first.
+                scaleByteV = self.writer.vgprPool.checkOut(1, tag="mx_scByte")
+                for j in range(g):
+                    n = nBase + j
+                    module.addComment0(f"  SubCol store qi={qi}, n={n}.")
+                    freeV, kblkV = self._subColPositions(module, n, qi, col, waveM, waveN)
+                    self._buildSubColWriteMask(module, rowGroup, freeV, kblkV,
+                                               totalFree, totalKBlocks, laneMask)
+                    module.add(SAndSaveExecB64(dst=sgpr(savedExec, lsc),
+                                               src=sgpr(laneMask, lsc),
+                                               comment="save exec; set exec = write-lane mask."))
+                    self._swizzleTileByteOffset(module, freeV, kblkV, totalKBlocks)
+                    self._computeScaleByteInline(module, j, qmulBase, scaleByteV)
+                    module.add(BufferStoreB8(
+                        src=vgpr(scaleByteV), vaddr=vgpr(freeV),
+                        saddr=sgpr(mxSrd, 4), soffset=0,
+                        mubuf=MUBUFModifiers(offen=True),
+                        comment=f"MXScale[freeV, kblkV] byte (qi={qi}, n={n})."))
+                    module.add(SMovB64(dst=EXEC(), src=sgpr(savedExec, lsc),
+                                       comment="restore exec mask."))
+                    self.writer.vgprPool.checkIn(kblkV)
+                    self.writer.vgprPool.checkIn(freeV)
+                self.writer.vgprPool.checkIn(scaleByteV)
+                self.writer.vgprPool.checkIn(qmulBase)
+                self.writer.vgprPool.checkIn(amaxBase)
+        module.add(SWaitCnt(vscnt=0, comment="wait MXScale subColQuant stores."))
+        self.writer.vgprPool.checkIn(totalKBlocks)
+        self.writer.vgprPool.checkIn(totalFree)
+        if waveN is not None:
+            self.writer.vgprPool.checkIn(waveN)
+        if waveM is not None:
+            self.writer.vgprPool.checkIn(waveM)
+        self.writer.vgprPool.checkIn(accTmp)
+        self.writer.vgprPool.checkIn(absMask)
+        self.writer.sgprPool.checkIn(zeroMask)
+        self.writer.vgprPool.checkIn(c254V)
+        self.writer.vgprPool.checkIn(invFp8V)
+        return module
+
     def _freeEmitRegs(self, amaxVgprs: int, accTmp: int, quantMultVgprs: int,
                        laneId: int, col: int, rowGroup: int,
                        mxSrd: int, savedExec: int, laneMask: int) -> None:
@@ -1247,26 +1435,36 @@ class SubtileMXFP8QuantEmitter(SubtileDynamicQuant):
 
     def emit(self, vgprTiles) -> Module:
         """Return the full MXFP8Quant epilogue module."""
-        totalTiles = self.tileArrayLen
         module = Module("MXFP8Quant epilogue")
         module.addComment1("MXFP8Quant: per-block e8m0 dynamic quant for fp8 D output.")
         module.addComment0(
             f"  q0={self.q0}, q1={self.q1}, nQTilesM={self.nQTilesM}, nQTilesN={self.nQTilesN}.")
         module.add(SWaitCnt(waitAll=True, comment="flush MFMA pipeline before MXFP8Quant."))
-        amaxVgprs      = self.writer.vgprPool.checkOut(totalTiles, tag="mx_amaxVgprs")
-        accTmp         = self.writer.vgprPool.checkOut(1,           tag="mx_accTmp")
-        quantMultVgprs = self.writer.vgprPool.checkOut(totalTiles,  tag="mx_quantMultVgprs")
-        laneId         = self.writer.vgprPool.checkOut(1,           tag="mx_laneId")
-        col            = self.writer.vgprPool.checkOut(1,           tag="mx_col")
-        rowGroup       = self.writer.vgprPool.checkOut(1,           tag="mx_rowGroup")
-        mxSrd  = self.writer.sgprPool.checkOutAligned(4, 4, tag="mx_mxSrd",
-                                                        preventOverflow=False)
+        laneId    = self.writer.vgprPool.checkOut(1, tag="mx_laneId")
+        col       = self.writer.vgprPool.checkOut(1, tag="mx_col")
+        rowGroup  = self.writer.vgprPool.checkOut(1, tag="mx_rowGroup")
+        mxSrd     = self.writer.sgprPool.checkOutAligned(4, 4, tag="mx_mxSrd",
+                                                          preventOverflow=False)
         savedExec = self.writer.sgprPool.checkOutAligned(
             self.laneSgprCount, self.laneSgprCount, tag="mx_savedExec", preventOverflow=False)
         laneMask  = self.writer.sgprPool.checkOutAligned(
             self.laneSgprCount, self.laneSgprCount, tag="mx_laneMask", preventOverflow=False)
         module.add(self._setup(mxSrd, laneId, col, rowGroup))
         module.add(self._applyAlphaInPlace(vgprTiles))
+        if self.subColQuant:
+            module.add(self._streamSubCol(vgprTiles, mxSrd, laneId, col,
+                                           rowGroup, savedExec, laneMask))
+            self.writer.sgprPool.checkIn(laneMask)
+            self.writer.sgprPool.checkIn(savedExec)
+            self.writer.sgprPool.checkIn(mxSrd)
+            self.writer.vgprPool.checkIn(rowGroup)
+            self.writer.vgprPool.checkIn(col)
+            self.writer.vgprPool.checkIn(laneId)
+            return module
+        totalTiles     = self.tileArrayLen
+        amaxVgprs      = self.writer.vgprPool.checkOut(totalTiles, tag="mx_amaxVgprs")
+        accTmp         = self.writer.vgprPool.checkOut(1,           tag="mx_accTmp")
+        quantMultVgprs = self.writer.vgprPool.checkOut(totalTiles,  tag="mx_quantMultVgprs")
         module.add(self._laneTileAmax(vgprTiles, amaxVgprs, accTmp, rowGroup))
         module.add(self._butterflyReduce(amaxVgprs, laneId))
         # Compute quantMult per tile; scaleByte is recovered inline during writes.

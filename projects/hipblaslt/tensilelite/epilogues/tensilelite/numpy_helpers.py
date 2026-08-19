@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Numpy input generation and reference helpers for epilogue kernels."""
 import math
+import struct as _struct
 
 import ml_dtypes
 import numpy as np
@@ -92,54 +93,65 @@ def tileQuantReference(dEff_f32, q0, q1, fp8Max=448.0):
     return scale, out.astype(ml_dtypes.float8_e4m3fn)
 
 
-def mxfp8QuantReference(dEff_f32, q0, q1):
+def _e8m0ScaleByte(amax, fp8Max=448.0):
+    """Return (scaleByte, quantMult) for one MX block given its absolute maximum."""
+    if amax == 0.0:
+        return 0, 0.0
+    scaleF = amax / fp8Max
+    bits = _struct.unpack('<I', _struct.pack('<f', scaleF))[0]
+    expByte = (bits >> 23) & 0xFF
+    mant = bits & 0x7FFFFF
+    sb = max(0, min(254, expByte + (1 if mant != 0 else 0)))
+    qExpField = max(1, min(254, 254 - sb))
+    quantMult = _struct.unpack('<f', _struct.pack('<I', qExpField << 23))[0]
+    return sb, quantMult
+
+
+def mxfp8QuantReference(dEff_f32, q0=1, q1=32):
     """Compute per-block e8m0 MX dynamic fp8 quantization reference outputs.
 
-    Returns (mxScale, dFp8) where mxScale is a flat uint8 array of length
-    paddedRows*paddedCols in the GFX950 pre-swizzled layout (rows padded to a
-    multiple of 32, cols to a multiple of 8) and dFp8 has the same shape as
-    dEff_f32 in OCP e4m3. dEff_f32 is the f32 effective D before quantization
-    (alpha already applied).
+    Returns (mxScale, dFp8) where mxScale is a flat uint8 array in the GFX950
+    pre-swizzled layout and dFp8 has the same shape as dEff_f32 in OCP e4m3.
+    dEff_f32 is the f32 effective D before quantization (alpha already applied).
 
-    e8m0 math (per block):
-      if amax == 0: scaleByte = 0, quantMult = 0
-      else:
-        scaleF   = amax * (1/448)
-        expByte  = (bits >> 23) & 0xFF
-        ceilAdj  = (mant != 0) ? 1 : 0
-        scaleByte = clamp(expByte + ceilAdj, 0, 254)
-        qExpField = clamp(254 - scaleByte, 1, 254)
-        quantMult = bitcast<float>(qExpField << 23)
+    Orientation depends on q0/q1:
+      q0=1, q1=32 (old path): 32-element blocks along axis-1 (free1/M_tokens).
+        Scale shape (mT, nT) = (N_hidden, M_tokens/32); outer ti, inner tj.
+      q0=32, q1=1 (new path): 32-element blocks along axis-0 (free0/N_hidden).
+        Scale shape (nT, mT) = (M_tokens, N_hidden/32); outer tj, inner ti.
     """
-    import struct as _struct
-    fp8Max = 448.0
-
     M, N = dEff_f32.shape
     mT = math.ceil(M / q0)
     nT = math.ceil(N / q1)
-    scale = np.zeros((mT, nT), dtype=np.uint8)
-    out   = np.zeros((M, N),   dtype=np.float32)
-    for ti in range(mT):
+    out = np.zeros((M, N), dtype=np.float32)
+
+    if q0 == 1 and q1 == 32:
+        # Old path: block along axis-1 (free1), scale shape (mT, nT).
+        scale = np.zeros((mT, nT), dtype=np.uint8)
+        for ti in range(mT):
+            for tj in range(nT):
+                mStart, mEnd = ti * q0, min((ti + 1) * q0, M)
+                nStart, nEnd = tj * q1, min((tj + 1) * q1, N)
+                blk = dEff_f32[mStart:mEnd, nStart:nEnd]
+                amax = float(np.max(np.abs(blk))) if blk.size else 0.0
+                sb, quantMult = _e8m0ScaleByte(amax)
+                scale[ti, tj] = sb
+                if quantMult > 0.0:
+                    out[mStart:mEnd, nStart:nEnd] = blk * quantMult
+    else:
+        # New path (q0=32, q1=1): block along axis-0 (free0), scale shape (nT, mT).
+        scale = np.zeros((nT, mT), dtype=np.uint8)
         for tj in range(nT):
-            mStart, mEnd = ti * q0, min((ti + 1) * q0, M)
-            nStart, nEnd = tj * q1, min((tj + 1) * q1, N)
-            blk  = dEff_f32[mStart:mEnd, nStart:nEnd]
-            amax = float(np.max(np.abs(blk))) if blk.size else 0.0
-            if amax == 0.0:
-                scale[ti, tj] = 0
-                continue
-            scaleF = amax / fp8Max
-            bits = _struct.unpack('<I', _struct.pack('<f', scaleF))[0]
-            expByte = (bits >> 23) & 0xFF
-            mant    = bits & 0x7FFFFF
-            ceilAdj = 1 if mant != 0 else 0
-            sb = expByte + ceilAdj
-            sb = max(0, min(254, sb))
-            scale[ti, tj] = sb
-            qExpField = max(1, min(254, 254 - sb))
-            quantMultBits = qExpField << 23
-            quantMult = _struct.unpack('<f', _struct.pack('<I', quantMultBits))[0]
-            out[mStart:mEnd, nStart:nEnd] = blk * quantMult
+            for ti in range(mT):
+                mStart, mEnd = ti * q0, min((ti + 1) * q0, M)
+                nStart, nEnd = tj * q1, min((tj + 1) * q1, N)
+                blk = dEff_f32[mStart:mEnd, nStart:nEnd]
+                amax = float(np.max(np.abs(blk))) if blk.size else 0.0
+                sb, quantMult = _e8m0ScaleByte(amax)
+                scale[tj, ti] = sb
+                if quantMult > 0.0:
+                    out[mStart:mEnd, nStart:nEnd] = blk * quantMult
+
     dFp8 = out.astype(ml_dtypes.float8_e4m3fn)
     assert np.all(np.isfinite(dFp8.astype(np.float32))), \
         "mxfp8QuantReference: NaN in fp8 D (ceiling exponent should prevent overflow)"

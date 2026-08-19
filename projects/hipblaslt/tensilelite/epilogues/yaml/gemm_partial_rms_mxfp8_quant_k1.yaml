@@ -59,8 +59,8 @@ BenchmarkProblems:
         - PartialRMSResidualAdd: [False]
         - PartialRMSQuant: [False]
         - DQuantType: [MXFP8]
-        - DQuantSize0: [1]
-        - DQuantSize1: [32]
+        - DQuantSize0: [32]
+        - DQuantSize1: [1]
         - StreamK: [3]
         - StreamKForceDPOnly: [1]
         - StreamKAtomic: [0]
@@ -135,5 +135,5 @@ TestAxes:
 
 LibraryLogic:
   ScheduleName: "partialrms_mxfp8_quant_k1"
-  DeviceNames: ["Device 74a1", "Device 75a0", "Device 75b0", "Device 75a2", "Device 75b2", "Device 75a3", "Device 75b3", "Device 75a8", "Device 75b8"]
+  DeviceNames: ["Device 75a0", "Device 75b0", "Device 75a2", "Device 75b2", "Device 75a3", "Device 75b3", "Device 75a8", "Device 75b8"]
   ArchitectureName: "gfx950"

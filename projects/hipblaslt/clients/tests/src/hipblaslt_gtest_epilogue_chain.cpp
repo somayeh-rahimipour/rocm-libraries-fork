@@ -1697,7 +1697,8 @@ static void expectMxfp8Near(const std::vector<uint8_t>& hD,
 }
 
 // CPU reference for the producer's transposed MX-fp8 quant: dOutT[nh, mt] = gamma[nh]*h1[mt, nh],
-// block along the mTok (free1) axis with q0=1 over nHid. Returns swizzled scale + fp8 D bytes.
+// block along the N_hidden (free0) axis with q1=1 over M_tokens. Scale grid is
+// [M_tokens (rows) x N_hidden/blockSize (cols)]. Returns swizzled scale + fp8 D bytes.
 static MxFp8Ref referenceProducerMxfp8(const std::vector<float>&    h1,
                                        const std::vector<uint16_t>& hGamma,
                                        int64_t                      mTok,
@@ -1706,31 +1707,31 @@ static MxFp8Ref referenceProducerMxfp8(const std::vector<float>&    h1,
                                        int64_t                      paddedRows,
                                        int64_t                      paddedCols)
 {
-    const int64_t mTiles = nHid;
-    const int64_t nTiles = (mTok + blockSize - 1) / blockSize;
+    const int64_t mTiles = mTok;                               // rows = free1 (M_tokens).
+    const int64_t nTiles = (nHid + blockSize - 1) / blockSize; // cols = kblock (N_hidden/blockSize).
 
     std::vector<uint8_t> scalePlain(static_cast<size_t>(paddedRows) * paddedCols, 0);
     std::vector<float>   dQuantF32(static_cast<size_t>(mTok) * nHid, 0.0f);
-    for(int64_t ti = 0; ti < mTiles; ++ti)
-        for(int64_t tj = 0; tj < nTiles; ++tj)
+    for(int64_t ti = 0; ti < mTiles; ++ti)         // ti = M_token (free1).
+        for(int64_t tj = 0; tj < nTiles; ++tj)     // tj = N_hidden block (free0/blockSize).
         {
             float amax = 0.0f;
             for(int64_t dj = 0; dj < blockSize; ++dj)
             {
-                const int64_t mt = tj * blockSize + dj;
-                if(mt >= mTok)
+                const int64_t nh = tj * blockSize + dj;
+                if(nh >= nHid)
                     break;
-                amax = std::max(amax, std::abs(h1[mt * nHid + ti] * bf16_to_f32(hGamma[ti])));
+                amax = std::max(amax, std::abs(h1[ti * nHid + nh] * bf16_to_f32(hGamma[nh])));
             }
             uint8_t     sb;
             const float mult                 = e8m0QuantMult(amax, sb);
             scalePlain[ti * paddedCols + tj] = sb;
             for(int64_t dj = 0; dj < blockSize; ++dj)
             {
-                const int64_t mt = tj * blockSize + dj;
-                if(mt >= mTok)
+                const int64_t nh = tj * blockSize + dj;
+                if(nh >= nHid)
                     break;
-                dQuantF32[ti + mt * nHid] = h1[mt * nHid + ti] * bf16_to_f32(hGamma[ti]) * mult;
+                dQuantF32[nh + ti * nHid] = h1[ti * nHid + nh] * bf16_to_f32(hGamma[nh]) * mult;
             }
         }
 
@@ -2243,8 +2244,10 @@ static TypedTestDims makeTypedTestDims(hipDataType gemm1InType)
     d.elemSz = (gemm1InType == HIP_R_16F || gemm1InType == HIP_R_16BF) ? 2u : 1u;
     d.isBf8  = (gemm1InType == HIP_R_8F_E5M2);
 
-    d.mTiles     = d.nHid;
-    d.nTiles     = (d.mTok + d.blockSize - 1) / d.blockSize;
+    // Producer scale (new orientation): rows = M_tokens (free1, pad x32),
+    // cols = N_hidden/blockSize (kblock, pad x8) with the AITER GFX950 swizzle.
+    d.mTiles     = d.mTok;
+    d.nTiles     = (d.nHid + d.blockSize - 1) / d.blockSize;
     d.paddedRows = ((d.mTiles + 31) / 32) * 32;
     d.paddedCols = ((d.nTiles + 7) / 8) * 8;
     d.scaleBufSz = static_cast<size_t>(d.paddedRows) * d.paddedCols;
@@ -2253,9 +2256,9 @@ static TypedTestDims makeTypedTestDims(hipDataType gemm1InType)
     d.szABytes = static_cast<size_t>(d.k0) * d.mTok * d.elemSz;
     d.szBBytes = static_cast<size_t>(d.k0) * d.nHid * d.elemSz;
 
-    d.consAPaddedRows = ((d.mTok + 31) / 32) * 32;
-    d.consAPaddedCols = ((d.nHid / d.blockSize + 7) / 8) * 8;
-    d.consAScaleSz    = static_cast<size_t>(d.consAPaddedRows) * d.consAPaddedCols;
+    d.consAPaddedRows = d.paddedRows;
+    d.consAPaddedCols = d.paddedCols;
+    d.consAScaleSz    = d.scaleBufSz;
 
     d.consBPaddedRows = ((d.nOut + 31) / 32) * 32;
     d.consBPaddedCols = ((d.nHid / d.blockSize + 7) / 8) * 8;
@@ -2472,7 +2475,8 @@ static void validateProducer(const TypedTestDims&         d,
     }
 }
 
-// Dequant producer D1 and quantize to consumer A+B MX formats for GEMM2.
+// Build consumer A+B MX buffers for GEMM2.
+// The producer's fp8 D and pre-swizzled scale are passed through directly as consumer A.
 static ConsumerQuantData buildConsumerQuantData(const TypedTestDims&         d,
                                                 const std::vector<uint16_t>& hW1,
                                                 const std::vector<uint8_t>&  hD1,
@@ -2480,66 +2484,33 @@ static ConsumerQuantData buildConsumerQuantData(const TypedTestDims&         d,
 {
     ConsumerQuantData cq;
 
-    // Dequant producer fp8 D → h2Float using the producer's pre-swizzled scale.
-    std::vector<float> h2Float(static_cast<size_t>(d.nHid) * d.mTok, 0.0f);
+    // Pass the producer's fp8 D and pre-swizzled scale directly to the consumer.
+    cq.consAFp8   = hD1;
+    cq.consAScale = hMxScale;
+
+    // Dequant the producer's fp8 D for the CPU reference computation.
+    cq.consADequant.assign(static_cast<size_t>(d.nHid) * d.mTok, 0.0f);
     for(int64_t nh = 0; nh < d.nHid; ++nh)
         for(int64_t mt = 0; mt < d.mTok; ++mt)
         {
-            const int64_t tj        = mt / d.blockSize;
-            const int64_t d0        = nh >> 5;
-            const int64_t d1        = (nh >> 4) & 1;
-            const int64_t d2        = nh & 0xF;
-            const int64_t d3        = tj >> 3;
-            const int64_t d4        = (tj >> 2) & 1;
-            const int64_t d5        = tj & 3;
+            const int64_t kj        = nh / d.blockSize; // N_hidden block (col).
+            const int64_t d0        = mt >> 5;           // row = M_token (free1).
+            const int64_t d1        = (mt >> 4) & 1;
+            const int64_t d2        = mt & 0xF;
+            const int64_t d3        = kj >> 3;           // col = kblock.
+            const int64_t d4        = (kj >> 2) & 1;
+            const int64_t d5        = kj & 3;
             const int64_t colBlocks = d.paddedCols / 8;
-            const int64_t swzOff
-                = d0 * (colBlocks * 256) + d3 * 256 + d5 * 64 + d2 * 4 + d4 * 2 + d1;
-            const uint8_t sb     = hMxScale[static_cast<size_t>(swzOff)];
-            float         dqMult = 0.0f;
+            const int64_t swzOff    = d0 * (colBlocks * 256) + d3 * 256 + d5 * 64 + d2 * 4 + d4 * 2 + d1;
+            const uint8_t sb        = hMxScale[static_cast<size_t>(swzOff)];
+            float         dqMult    = 0.0f;
             if(sb != 0)
             {
                 const uint32_t bits = static_cast<uint32_t>(sb) << 23;
                 std::memcpy(&dqMult, &bits, sizeof(dqMult));
             }
-            h2Float[nh + mt * d.nHid] = unpackF8(hD1[nh + mt * d.nHid]) * dqMult;
+            cq.consADequant[nh + mt * d.nHid] = unpackF8(hD1[nh + mt * d.nHid]) * dqMult;
         }
-
-    // Re-quantize h2Float in consumer A MX format (blocks of K=nh at fixed M=mt).
-    cq.consAFp8.resize(static_cast<size_t>(d.nHid) * d.mTok);
-    cq.consADequant.assign(static_cast<size_t>(d.nHid) * d.mTok, 0.0f);
-    std::vector<uint8_t> consAScalePlain(d.consAScaleSz, 0);
-    for(int64_t mt = 0; mt < d.mTok; ++mt)
-        for(int64_t nhBlock = 0; nhBlock < d.consAPaddedCols; ++nhBlock)
-        {
-            float amax = 0.0f;
-            for(int64_t j = 0; j < d.blockSize; ++j)
-            {
-                const int64_t nh = nhBlock * d.blockSize + j;
-                if(nh >= d.nHid)
-                    break;
-                amax = std::max(amax, std::abs(h2Float[nh + mt * d.nHid]));
-            }
-            uint8_t     sb;
-            const float qmult  = e8m0QuantMult(amax, sb);
-            float       dqMult = 0.0f;
-            if(sb != 0)
-            {
-                const uint32_t bits = static_cast<uint32_t>(sb) << 23;
-                std::memcpy(&dqMult, &bits, sizeof(dqMult));
-            }
-            consAScalePlain[mt * d.consAPaddedCols + nhBlock] = sb;
-            for(int64_t j = 0; j < d.blockSize; ++j)
-            {
-                const int64_t nh = nhBlock * d.blockSize + j;
-                if(nh >= d.nHid)
-                    break;
-                cq.consAFp8[nh + mt * d.nHid] = packF8(h2Float[nh + mt * d.nHid] * qmult);
-                cq.consADequant[nh + mt * d.nHid]
-                    = unpackF8(cq.consAFp8[nh + mt * d.nHid]) * dqMult;
-            }
-        }
-    cq.consAScale = swizzleGfx950(consAScalePlain, d.consAPaddedRows, d.consAPaddedCols);
 
     // Quantize hW1 (bf16) to fp8 B with consumer B MX scale (blocks of K=nh at N=no).
     cq.consBFp8.resize(static_cast<size_t>(d.nHid) * d.nOut);

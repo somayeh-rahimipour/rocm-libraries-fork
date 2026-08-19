@@ -672,6 +672,12 @@ namespace TensileLite
             DQuantType dquantType      = DQuantType::None;
             bool useDeepseekScaleA     = false;
             bool useDeepseekScaleB     = false;
+            // Block-scale tile dims serialized by the library writer; read so the
+            // client accepts the keys (not used for kernel selection).
+            int deepseekScaleAq0       = 128;
+            int deepseekScaleAq1       = 128;
+            int deepseekScaleBq0       = 1;
+            int deepseekScaleBq1       = 128;
         };
 
         struct LinearModel

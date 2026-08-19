@@ -2236,19 +2236,19 @@ namespace
                 tensileProblem.setScaleAlphaVec(compute_type, d.sizes()[0]);
             }
             // MX block-scale dequant: wire DQuantType::MXFP8 and the scale tensor dimensions.
-            // prob.m = N_hidden, prob.n = M_tokens after any needed transpose, so q0 tiles
-            // along the N_hidden axis (free0) and q1 tiles along the M_tokens axis (free1).
+            // q0=32 blocks along free0 (N_hidden); q1=1 per free1 element (M_tokens).
+            // Scale grid: rows=M_tokens (freeTiles, padded×32), cols=N_hidden/32 (kBlockTiles, padded×8).
             if(fusedInfo.hasRequant
                && fusedInfo.requantGranularity == HIPBLASLT_REQUANT_SCALE_PER_BLOCK_MX)
             {
-                const int32_t q0     = 1;
-                const int32_t q1     = fusedInfo.requantMxBlockSize;
-                const int64_t mTiles = (static_cast<int64_t>(prob.m) + q0 - 1) / q0;
-                const int64_t nTiles = (static_cast<int64_t>(prob.n) + q1 - 1) / q1;
+                const int32_t q0          = fusedInfo.requantMxBlockSize;  // 32
+                const int32_t q1          = 1;
+                const int64_t kBlockTiles = (static_cast<int64_t>(prob.m) + q0 - 1) / q0;
+                const int64_t freeTiles   = (static_cast<int64_t>(prob.n) + q1 - 1) / q1;
                 tensileProblem.setDquantType(TensileLite::DQuantType::MXFP8);
                 tensileProblem.setDquantSize0(q0);
                 tensileProblem.setDquantSize1(q1);
-                tensileProblem.setMxScale(mTiles, nTiles);
+                tensileProblem.setMxScale(freeTiles, kBlockTiles);
             }
         }
 
@@ -2551,17 +2551,18 @@ namespace
                 }
                 // MX block-scale dequant: refresh dimensions each call (same logic as
                 // ConstructTensileProblem) so selection sees the correct scale-tensor shape.
+                // q0=32 along free0 (N_hidden), q1=1 per free1 element (M_tokens).
                 if(fusedInfo.hasRequant
                    && fusedInfo.requantGranularity == HIPBLASLT_REQUANT_SCALE_PER_BLOCK_MX)
                 {
-                    const int32_t q0     = 1;
-                    const int32_t q1     = fusedInfo.requantMxBlockSize;
-                    const int64_t mTiles = (static_cast<int64_t>(prob.m) + q0 - 1) / q0;
-                    const int64_t nTiles = (static_cast<int64_t>(prob.n) + q1 - 1) / q1;
+                    const int32_t q0          = fusedInfo.requantMxBlockSize;  // 32
+                    const int32_t q1          = 1;
+                    const int64_t kBlockTiles = (static_cast<int64_t>(prob.m) + q0 - 1) / q0;
+                    const int64_t freeTiles   = (static_cast<int64_t>(prob.n) + q1 - 1) / q1;
                     tensileProblem.setDquantType(TensileLite::DQuantType::MXFP8);
                     tensileProblem.setDquantSize0(q0);
                     tensileProblem.setDquantSize1(q1);
-                    tensileProblem.setMxScale(mTiles, nTiles);
+                    tensileProblem.setMxScale(freeTiles, kBlockTiles);
                 }
             }
         }
