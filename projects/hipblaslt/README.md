@@ -269,8 +269,8 @@ inv build --architecture gfx1100 --clean
 * `HIPBLASLT_TENSILE_LIBPATH` Path to output the device gemm libraries (default: `build/Tensile`)
 
 > [!NOTE]
-> To determine defaults for the `TensileCreateLibrary` command generated when building the device
-> libraries, run `Tensile/bin/TensileCreateLibrary --help` from the tensilelite directory.
+> To determine defaults for the create-library command generated when building the device
+> libraries, run `python -m tensilelite create-library --help` from the tensilelite directory.
 
 > [!NOTE]
 > Refer to the tensilelite [README](./tensilelite/README.md) for instructions on building for the tensile workflow.

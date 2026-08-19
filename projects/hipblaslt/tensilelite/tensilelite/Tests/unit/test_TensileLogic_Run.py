@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Unit tests for tensilelite/TensileLogic/Run.py
+Unit tests for tensilelite/tensilelite_logic/Run.py
 """
 
 import pytest
