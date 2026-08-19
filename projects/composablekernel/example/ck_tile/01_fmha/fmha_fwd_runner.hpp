@@ -2709,12 +2709,83 @@ fwd_result fmha_fwd_run(mode_enum mode,
             else if(o_perm) o_host_result.ForEach([&](auto& self, auto idx) { self(idx) = o_host(b_idx, idx[0], idx[1] + query_offset, idx[2]); });
             else       o_host_result.ForEach([&](auto& self, auto idx) { self(idx) = o_host(b_idx, idx[1] + query_offset, idx[0], idx[2]); });
             // clang-format on
-            auto [rtol, atol] = get_elimit<DataTypeConfig>(init_method);
-            bool cur_pass     = ck_tile::check_err(o_host_result,
-                                               o_host_ref,
-                                               std::string("OUT Error: Incorrect results!"),
-                                               rtol,
-                                               atol);
+            // The shipped tolerance cannot fail when ODataType is fp8_t: check_err
+            // then takes its fp8 overload, whose criterion is |out - ref| <= atol or
+            // code_distance <= rtol, and get_elimit returns an atol of 16 or 32 while
+            // O, being a convex combination of V, stays within max|V|. For the
+            // quantized paths two derived checks replace it.
+            bool cur_pass = true;
+            if constexpr(supports_qscale)
+            {
+                // (P|V|)/l is a P-weighted mean of |V| and so never exceeds max|V|,
+                // which bounds the perturbation from quantizing P without a second GEMM.
+                double max_abs_v = 0;
+                v_host_ref.ForEach([&](auto& self, auto i) {
+                    max_abs_v = std::max(
+                        max_abs_v, double(std::abs(ck_tile::type_convert<float>(self(i)))));
+                });
+                double max_descale = 1.0;
+                if constexpr(std::is_same_v<VScaleDataType, float>)
+                {
+                    if(qscale.type != quant_scale_enum::no_scale)
+                    {
+                        max_descale = 0;
+                        v_descale_host.ForEach([&](auto& self, auto i) {
+                            max_descale = std::max(max_descale, double(std::abs(self(i))));
+                        });
+                    }
+                }
+                const double cond = max_abs_v * max_descale;
+                // Take u_p from fp8_t, not PDataType: the device quantizes P to fp8
+                // whatever the host stores it in, and here PDataType is float with
+                // quantize_p_ref applying the device-style per-32 quantization in
+                // place, so numeric_traits<PDataType> would report 23 mantissa bits and
+                // erase this term. A full ULP rather than half, because the per-32
+                // group scale is itself rounded, so P carries two roundings.
+                const double u_p =
+                    quantizes_p
+                        ? std::pow(2.0, -ck_tile::numeric_traits<ck_tile::fp8_t>::mant)
+                        : 0.0;
+                // Likewise a full ULP: out and ref are both rounded to ODataType.
+                const double u_o = std::pow(2.0, -ck_tile::numeric_traits<ODataType>::mant);
+                int    over  = 0;
+                double worst = 0, num = 0, den = 0;
+                o_host_result.ForEach([&](auto& self, auto idx) {
+                    const double o   = ck_tile::type_convert<float>(self(idx));
+                    const double r   = ck_tile::type_convert<float>(o_host_ref(idx));
+                    const double lim = u_p * cond + u_o * std::abs(r);
+                    const double err = std::abs(o - r);
+                    if(lim > 0)
+                        worst = std::max(worst, err / lim);
+                    if(err > lim)
+                        ++over;
+                    num += (o - r) * r;
+                    den += r * r;
+                });
+                // That bound is blind to a systematic gain, which scales with |O| while
+                // the bound scales with max|V| >= |O|. alpha is (g - 1) exactly for a
+                // uniform gain, so it sees what the elementwise bound cannot. The
+                // largest |alpha| a correct kernel produced across the forward test
+                // matrix was 8.7e-4.
+                const double     alpha     = (den > 0 ? num / den : 0.0);
+                constexpr double alpha_max = 1e-2;
+                cur_pass                   = (over == 0) && (std::abs(alpha) <= alpha_max);
+                if(over != 0)
+                    std::cerr << "OUT accuracy bound: " << over << " elements over, worst "
+                              << worst << "x" << std::endl;
+                if(std::abs(alpha) > alpha_max)
+                    std::cerr << "OUT systematic gain: alpha " << alpha << " exceeds "
+                              << alpha_max << std::endl;
+            }
+            else
+            {
+                auto [rtol, atol] = get_elimit<DataTypeConfig>(init_method);
+                cur_pass          = ck_tile::check_err(o_host_result,
+                                              o_host_ref,
+                                              std::string("OUT Error: Incorrect results!"),
+                                              rtol,
+                                              atol);
+            }
             pass &= cur_pass;
             if(!cur_pass)
             {
