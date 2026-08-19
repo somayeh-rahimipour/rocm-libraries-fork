@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
-"""gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] factored cluster codegen.
+"""gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] Target A codegen.
 
-B-multicast along Cs plus K-split along Ck. Multicast owns the cluster
-barrier; the K-split reduction uses the global-flag path.
+2-D spatial A+B multicast in the DP window (same meaning as ForceDPOnly=1),
+ordinary SK-tail loads, cluster-barrier reduction of SK partials.
 """
 
 import os
@@ -41,21 +41,29 @@ def test_streamk_cluster_factored_gfx1250_emits_assembly():
         assert "workaround" not in src, (
             f"Kernel {base!r}: ttmp reread emitted under ClusterDim != [1, 1]"
         )
-        assert "2-D cluster: StreamKIdx = WorkGroup0*Ck + WorkGroup1" in src, (
-            f"Kernel {base!r}: missing 2-D StreamK index fold"
+        assert "DP fold: StreamKIdx = batch*(nWG0*nWG1) + N*nWG0 + M" in src, (
+            f"Kernel {base!r}: missing M-fastest 2-D DP StreamK index fold"
         )
-        assert "StreamKFactored: B-multicast along Cs=" in src, (
-            f"Kernel {base!r}: missing factored B-multicast mask compute"
+        assert "2-D cluster: StreamKIdx = WorkGroup0*Ck + WorkGroup1" not in src, (
+            f"Kernel {base!r}: Target A must not use the K-fastest [1,C] fold"
         )
-        assert "maskB_base=0x3 (shifted by k*Cs)" in src, (
-            f"Kernel {base!r}: factored B-mask must be X-fast ((1<<Cs)-1) << (k*Cs), not StreamK-linear"
+        assert "StreamKFactored: B-multicast along Cs=" not in src, (
+            f"Kernel {base!r}: Target A must not emit factored K-slice B-masks"
+        )
+        assert "k = StreamKIdx & (Ck-1)" not in src, (
+            f"Kernel {base!r}: Target A must not decode a K-slice rank from StreamKIdx"
+        )
+        assert "remap StreamKIdx to cluster-linear SK rank" in src, (
+            f"Kernel {base!r}: missing DP->SK cluster-linear StreamKIdx remap"
+        )
+        assert "clear BOTH A & B broadcast masks at DP->SK boundary" in src, (
+            f"Kernel {base!r}: missing DP->SK dual-mask clear"
         )
         assert "cluster_barrier signal (arrive)" in src, (
-            f"Kernel {base!r}: missing multicast prologue cluster arrive"
+            f"Kernel {base!r}: missing multicast / reduction cluster arrive"
         )
-        assert "cluster_barrier wait (all peers arrived)" not in src, (
-            f"Kernel {base!r}: factored multicast already owns -3; K-split "
-            "reduction must use the global-flag path, not a second cluster handshake"
+        assert "cluster_barrier wait (all peers arrived)" in src, (
+            f"Kernel {base!r}: missing SK-tail cluster-reduction wait"
         )
         assert "s_barrier_signal -3" in src, (
             f"Kernel {base!r}: missing cluster-scope barrier signal (-3)"

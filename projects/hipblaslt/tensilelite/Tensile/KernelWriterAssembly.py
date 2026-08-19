@@ -83,7 +83,7 @@ from .SolutionStructs import isPackedIndex
 from .AsmStoreState import StoreState, VectorDataTypes
 from .Activation import ActivationType
 from .CustomKernels import isCustomKernelConfig
-from .Common import roundUp, log2, ceilDivide, choose_multiplier, wmmaV3InputVgprLayout, clusterEnabled, isPow2, streamKMulticast
+from .Common import roundUp, log2, ceilDivide, choose_multiplier, wmmaV3InputVgprLayout, clusterEnabled, isPow2, streamKMulticast, streamK2DMulticast
 from .OccupancyMeasure import compute_occupancy_from_asm_source, _arch_caps_for_kernel
 from rocisa.instruction import ECvtF16toF32, ECvtF32toF16, ECvtPkFP8toF32
 from Tensile.Common import print2, printExit, printWarning, INDEX_CHARS, DebugConfig, DataDirection, isSubtileMultiDU
@@ -2414,16 +2414,17 @@ class KernelWriterAssembly(KernelWriter):
     B-multicast) and Ck (Y/N, A-multicast), and the grid is rounded up to a
     ClusterDim multiple, so the same validX/validY reduction applies. Its padded
     peers early-exit in StreamK.streamKClusterPadEarlyExit, so the surviving
-    peers' ld_bcst must wait only on the present lanes. The two-tile
-    (StreamKForceDPOnly==0) Stream-K cluster is excluded: WorkGroup0 there is the
-    linear work index rather than an M-tile. Factored [Cs,Ck] B-masks are
-    rewritten later in StreamK.streamKFactoredMaskCompute.
+    peers' ld_bcst must wait only on the present lanes. Target A (ForceDPOnly=0
+    [Cs,Ck]) launches the same 2-D M/N coords in DP, so the same reduction
+    applies. Pure [1,C] two-tile reduction is excluded: WorkGroup0 there is the
+    linear K-fastest work index rather than an M-tile.
     """
     cx = kernel["ClusterDim"][0]
     cy = kernel["ClusterDim"][1]
     if not ((cx > 1 or cy > 1)
             and (kernel["StreamK"] == 0
-                 or (streamKMulticast(kernel) and kernel["StreamKForceDPOnly"]))):
+                 or (streamKMulticast(kernel)
+                     and (kernel["StreamKForceDPOnly"] or streamK2DMulticast(kernel))))):
       return False
 
     module.addComment0("reduce multicast mask to real WGs in cluster")

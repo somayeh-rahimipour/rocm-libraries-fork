@@ -537,10 +537,14 @@ class ProblemPredicate(Properties.Predicate):
             valuepredicates.append(state["GlobalSplitU"])
             rv += [cls('WorkgroupNumberCheck', index=0, value=valuepredicates)]
 
-        # ForceDPOnly=0 cluster reduction: skip problems whose itersPerTile is
-        # not a multiple of Ck (the split-barrier path assumes an even K-split).
+        # ForceDPOnly=0 pure [1,C] cluster reduction: skip problems whose
+        # itersPerTile is not a multiple of Ck (the split-barrier path assumes
+        # an even K-split of every tile). Target A [Cs,Ck] uses standard
+        # two-tile SK accounting, so Ck is N-spatial in DP rather than a
+        # per-tile K-split factor.
         if (state.get("StreamK", 0) == 3
             and not state.get("StreamKForceDPOnly", 0)
+            and state.get("ClusterDim", [1, 1])[0] == 1
             and state.get("ClusterDim", [1, 1])[1] > 1):
             rv += [cls("ClusterReductionIterCheck",
                        value=[state["DepthU"], state["ClusterDim"][1]])]

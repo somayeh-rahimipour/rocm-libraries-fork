@@ -23,12 +23,13 @@ GlobalParameters:
 
 BenchmarkProblems:
   #######################################
-  # TN - StreamK=3, ForceDPOnly=0, factored ClusterDim [Cs, Ck]:
-  # B-multicast along Cs, K-split along Ck. Reduction uses the global-flag
-  # path (multicast owns -3). ClusterDim [2,2]/[2,4]/[4,2] matches the 2-D
-  # set of sk_mxf4_force_dp_only_cluster_multicast_ext.yaml. MatrixInstruction
-  # and M/N sizes match that suite. K is restricted to itersPerTile % Ck == 0.
-  # Batch stays 1: the 2-D launch is [skGrid/Ck, Ck, 1].
+  # TN - StreamK=3, ForceDPOnly=0, Target A ClusterDim [Cs, Ck]:
+  # 2-D A+B multicast in the DP window (Cs M-adjacent B, Ck N-adjacent A),
+  # ordinary SK-tail loads, cluster-barrier reduction of SK partials.
+  # ClusterDim [2,2]/[2,4]/[4,2] matches the 2-D set of
+  # sk_mxf4_force_dp_only_cluster_multicast_ext.yaml. MatrixInstruction
+  # and M/N sizes match that suite. Batch stays 1 (the persistent 2-D
+  # launch is dense per batch slice).
   #######################################
   -
     -

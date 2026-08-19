@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
-# gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] factored cluster
-# (B-multicast along Cs, K-split along Ck; flag-path reduction).
+# gfx1250 StreamK=3 ForceDPOnly=0 ClusterDim=[2,2] Target A cluster
+# (2-D A+B multicast in DP, cluster-barrier reduction on the SK tail).
 GlobalParameters:
   SyncsPerBenchmark: 0
   MinimumRequiredVersion: 5.0.0

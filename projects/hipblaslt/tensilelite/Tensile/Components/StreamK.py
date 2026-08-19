@@ -37,7 +37,7 @@ from rocisa.functions import scalarStaticDivideAndRemainder, sMagicDiv2, \
 from .Subtile.SubtileLREmit import localReadResetOffsetsSubtile
 
 from ..Common import print2, ceilDivide, log2, clusterEnabled, streamKMulticast, \
-    streamKClusterFactors, streamKClusterReduction
+    streamK2DMulticast, streamKDual2D, streamKClusterFactors, streamKClusterReduction
 from ..Component import Component
 from ..AsmStoreState import StoreState, VectorDataTypes
 from ..AsmAddressCalculation import AddrCalculation
@@ -1003,19 +1003,17 @@ class StreamK(Component):
 
         Both the owner's cluster wait and the non-owner's cluster signal use
         this identical predicate. Restricted to SK3 linear reduction (not tree),
-        non-atomic, ForceDPOnly=0, with HasClusterBarrier. Off when multicast
-        is also on: those kernels already complete a ``-3`` round around the
-        cooperative loads, and a later reduction signal cannot re-arm that
-        barrier after the prologue first-load wait. When the mainloop is
-        skipped (``SKItersPerWG == 1``) there is also no extra handshake to
-        pair with. Factored [Cs, Ck] still K-splits; peers join through the
-        global-flag path. Pure [1, C] keeps this fast path.
+        non-atomic, ForceDPOnly=0, with HasClusterBarrier. Pure [1, C] is
+        multicast-off so the cluster barrier is free for reduction. Target A
+        [Cs, Ck] also keeps this path: DP multicast consumes -3 per DP pass,
+        then the SK tail remaps to cluster-linear ranks and uses -3 for
+        partials fixup (SK loads are self-only after the DP->SK mask clear).
         """
         return (streamKClusterReduction(kernel)
                 and kernel["StreamK"] == 3
                 and not kernel["StreamKFixupTreeReduction"]
                 and not kernel["StreamKAtomic"]
-                and not streamKMulticast(kernel)
+                and (not streamKMulticast(kernel) or streamKDual2D(kernel))
                 and writer.states.asmCaps.get("HasClusterBarrier", False))
 
     def clusterReduceSignal(self, writer, kernel):
@@ -2983,21 +2981,22 @@ class StreamKTwoTileDPFirst(StreamK):
         present peers), the surviving peers' ``ld_bcst`` waits only on peers that
         are actually there.
 
-        This is the ForceDPOnly cluster path, which decodes the raw HW coords
-        (``WorkGroup0``=M-tile, ``WorkGroup1``=N-tile) into the linear DP index, so
-        a padded lane would both hang the ``-3`` barrier and stall ``ld_bcst``. On
-        a 1-D ``[Cs, 1]`` cluster ``WorkGroup1`` never exceeds its bound, so the
-        check degenerates to the M-tile one. The two-tile
-        (``StreamKForceDPOnly==0``) cluster instead defers its prologue cluster
-        arrive until AFTER the StreamK work-check (see ``preLoop``): there
-        ``StreamKIdx >= totalTiles`` does not imply "no work" (a K-split partial
-        still is work), so a coordinate-based exit would drop live partials.
+        This is the ForceDPOnly / Target A cluster path, which decodes the raw
+        HW coords (``WorkGroup0``=M-tile, ``WorkGroup1``=N-tile) into the linear
+        DP index, so a padded lane would both hang the ``-3`` barrier and stall
+        ``ld_bcst``. On a 1-D ``[Cs, 1]`` cluster ``WorkGroup1`` never exceeds
+        its bound, so the check degenerates to the M-tile one. Pure ``[1, C]``
+        two-tile reduction instead defers its prologue cluster arrive until
+        AFTER the StreamK work-check (see ``preLoop``): there ``StreamKIdx >=
+        totalTiles`` does not imply "no work" (a K-split partial still is work),
+        so a coordinate-based exit would drop live partials.
 
         MUST be called from ``preLoop`` BEFORE the tile-index fold overwrites
         ``WorkGroup0`` and BEFORE ``streamKMulticastPrologueSignal``.
         """
         module = Module("StreamK cluster pad early-exit")
-        if not (streamKMulticast(kernel) and kernel["StreamKForceDPOnly"]):
+        if not (streamKMulticast(kernel)
+                and (kernel["StreamKForceDPOnly"] or streamK2DMulticast(kernel))):
             return module
         assert clusterEnabled(kernel["ClusterDim"]), \
             "streamKClusterPadEarlyExit requires an enabled cluster"
@@ -3027,87 +3026,95 @@ class StreamKTwoTileDPFirst(StreamK):
             module.add(padNoExit)
         return module
 
-    def streamKFactoredMaskCompute(self, writer, kernel):
-        """Overwrite multicast masks for a ForceDPOnly=0 factored [Cs,Ck] cluster.
+    def _commitStreamKIdx(self, writer, kernel, module, sIdx):
+        """Write ``sIdx`` back to the persistent StreamKIdx slot (SGPR or VGPR)."""
+        if writer.isStreamKConstantsToVgprEnabled(kernel):
+            module.add(VMovB32(dst=vgpr(self._skv(writer, "StreamKIdx")), src=sgpr(sIdx),
+                               comment="persist remapped StreamKIdx"))
 
-        gfx1250 cluster rank is X-fast: rank = wg_y * Cs + wg_x = k * Cs + s,
-        with k = StreamKIdx & (Ck-1) and s = (StreamKIdx >> log2(Ck)) & (Cs-1).
-        Ck is a K-split, not N-spatial A-multicast, so A is the self bit
-        ``1 << (k*Cs + s)``. B is shared by the Cs X-peers at this K-slice
-        (the same spatial B-row the ForceDPOnly=1 path uses):
+    def streamKDual2DRemapSkIdx(self, writer, kernel, sIdx):
+        """Rewrite ``sIdx`` from M-fastest DP identity to cluster-linear SK rank.
 
-            MulticastMaskB = ((1 << Cs) - 1) << (k * Cs)
+        A Target A cluster is a 2-D lattice in M-fastest StreamKIdx
+        (``+1`` and ``+nWG0``), not ``C`` consecutive IDs. Standard SK K-split
+        and ``clusterReduceIntraCheck`` both group consecutive StreamKIdx onto
+        the same tile, so SK work must use:
 
-        On nWG0 not aligned to Cs, or a partial edge cluster, both masks fall
-        back to that self bit so loads are per-workgroup.
+            intra = (M % Cs) + (N % Ck) * Cs
+            clusterId = (M / Cs) + (N / Ck) * (nWG0 / Cs)
+            skRank = clusterId * C + intra
+
+        No-op when nWG0 is not a Cs multiple: SK keeps M-fastest identity and
+        ``clusterReduceIntraCheck`` falls back to the global-flag path.
+        Inert unless this is Target A (ForceDPOnly=0 2-D DP multicast).
         """
-        module = Module("StreamK factored multicast mask compute")
-        if not (streamKMulticast(kernel) and streamKClusterReduction(kernel)):
+        module = Module("StreamK dual-2D SK-rank remap")
+        if not streamKDual2D(kernel):
             return module
         cs, ck, C, _is2d = streamKClusterFactors(kernel)
-        maskBBase = (1 << cs) - 1
+        csShift = log2(cs)
         ckShift = log2(ck)
-        module.addComment0(
-            "StreamKFactored: B-multicast along Cs=%d X-peers at K-slice k, maskB_base=0x%x (shifted by k*Cs)"
-            % (cs, maskBBase))
-        skConstsInVgprs = writer.isStreamKConstantsToVgprEnabled(kernel)
-        mcInvalid = Label(writer.labels.getNameInc("SKFC_Invalid"), "")
-        mcEnd = Label(writer.labels.getNameInc("SKFC_End"), "")
-
-        def _emitSelfRank(t0, t1, tk, sIdx, comment):
-            """t0 = k*Cs + s; MaskA = 1 << t0. tk holds k; sIdx holds StreamKIdx."""
-            module.add(SMulI32(dst=sgpr(t0), src0=sgpr(tk), src1=hex(cs),
-                               comment="k * Cs"))
-            module.add(SLShiftRightB32(dst=sgpr(t1), src=sgpr(sIdx), shiftHex=hex(ckShift),
-                                       comment="StreamKIdx / Ck"))
-            module.add(SAndB32(dst=sgpr(t1), src0=sgpr(t1), src1=hex(cs - 1),
-                               comment="s = (StreamKIdx / Ck) & (Cs-1)"))
-            module.add(SAddU32(dst=sgpr(t0), src0=sgpr(t0), src1=sgpr(t1),
-                               comment="self rank = k*Cs + s"))
-            module.add(SLShiftLeftB32(dst=sgpr("MulticastMaskA"), shiftHex=sgpr(t0), src=hex(1),
-                                      comment=comment))
-
-        with writer.allocTmpSgpr(4, tag="SKFactoredPredicate") as tRes:
-            t0 = tRes.idx
-            t1 = tRes.idx + 1
-            t2 = tRes.idx + 2
-            tk = tRes.idx + 3
-            sIdx = writer.acquireStreamKConstSgpr(kernel, "StreamKIdx")
-            if skConstsInVgprs:
-                module.add(VReadfirstlaneB32(dst=sgpr(sIdx), src=vgpr(writer.states.skConstVgprs["StreamKIdx"])))
-            module.add(SAndB32(dst=sgpr(tk), src0=sgpr(sIdx), src1=hex(ck - 1),
-                               comment="k = StreamKIdx & (Ck-1) (K-slice rank)"))
+        done = Label(writer.labels.getNameInc("SKDual2D_RemapDone"), "")
+        module.addComment0("Target A: remap StreamKIdx to cluster-linear SK rank")
+        tmpVgpr = writer.vgprPool.checkOut(2, "SKDual2DDiv")
+        tmpVgprRes = ContinuousRegister(idx=tmpVgpr, size=2)
+        with writer.allocTmpSgpr(4, tag="SKDual2DRemap") as tRes:
+            tM = tRes.idx
+            tN = tRes.idx + 1
+            t0 = tRes.idx + 2
+            t1 = tRes.idx + 3
             module.add(SAndB32(dst=sgpr(t0), src0=sgpr("NumWorkGroups0"), src1=hex(cs - 1),
-                               comment="nWG0 %% Cs (Cs power of two)"))
+                               comment="nWG0 %% Cs"))
             module.add(SCmpEQU32(src0=sgpr(t0), src1=0, comment="nWG0 aligned to Cs?"))
-            module.add(SCBranchSCC0(labelName=mcInvalid.getLabelName(),
-                                    comment="unaligned M -> B not shared, load normally"))
-            module.add(SAndB32(dst=sgpr(t2), src0=sgpr(sIdx), src1=hex((~(C - 1)) & 0xFFFFFFFF),
-                               comment="clusterBase = StreamKIdx & ~(C-1)"))
-            module.add(SAddU32(dst=sgpr(t2), src0=sgpr(t2), src1=hex(C), comment="clusterBase + C"))
-            module.add(SMulI32(dst=sgpr(t1), src0=sgpr("NumWorkGroups0"), src1=sgpr("NumWorkGroups1"),
-                               comment="totalTiles = nWG0 * nWG1"))
-            module.add(SMulI32(dst=sgpr(t1), src0=sgpr(t1), src1=hex(ck),
-                               comment="Ck * totalTiles (work bound)"))
-            module.add(SCmpLeU32(src0=sgpr(t2), src1=sgpr(t1),
-                                 comment="cluster fully populated? clusterBase+C <= Ck*totalTiles"))
-            module.add(SCBranchSCC0(labelName=mcInvalid.getLabelName(),
-                                    comment="partial cluster -> B loaded normally (self-only mask)"))
-            module.add(SMulI32(dst=sgpr(t0), src0=sgpr(tk), src1=hex(cs),
-                               comment="k * Cs (X-fast B-row shift)"))
-            module.add(SLShiftLeftB32(dst=sgpr("MulticastMaskB"), shiftHex=sgpr(t0), src=hex(maskBBase),
-                                      comment="MulticastMaskB = ((1<<Cs)-1) << (k*Cs)"))
-            _emitSelfRank(t0, t1, tk, sIdx,
-                          "MulticastMaskA = 1 << (k*Cs + s) (self, no A-multicast)")
-            module.add(SBranch(labelName=mcEnd.getLabelName(),
-                               comment="valid cluster -> keep B broadcast mask"))
-            module.add(mcInvalid)
-            _emitSelfRank(t0, t1, tk, sIdx,
-                          "invalid/partial cluster -> self-only A mask")
-            module.add(SMovB32(dst=sgpr("MulticastMaskB"), src=sgpr("MulticastMaskA"),
-                               comment="invalid/partial cluster -> B loaded normally (self-only mask)"))
-            module.add(mcEnd)
-            writer.releaseStreamKConstSgpr(sIdx)
+            module.add(SCBranchSCC0(labelName=done.getLabelName(),
+                                    comment="unaligned M: keep M-fastest StreamKIdx"))
+            module.add(scalarUInt32DivideAndRemainder(
+                qReg=tN, dReg=sIdx, divReg="NumWorkGroups0", rReg=tM,
+                tmpVgprRes=tmpVgprRes, wavewidth=kernel["WavefrontSize"],
+                doRemainder=True, comment="N = StreamKIdx / nWG0, M = StreamKIdx % nWG0"))
+            module.add(SAndB32(dst=sgpr(t0), src0=sgpr(tM), src1=hex(cs - 1),
+                               comment="M % Cs"))
+            module.add(SAndB32(dst=sgpr(t1), src0=sgpr(tN), src1=hex(ck - 1),
+                               comment="N % Ck"))
+            module.add(SMulI32(dst=sgpr(t1), src0=sgpr(t1), src1=hex(cs),
+                               comment="(N % Ck) * Cs"))
+            module.add(SAddU32(dst=sgpr(t0), src0=sgpr(t0), src1=sgpr(t1),
+                               comment="intra = (M%Cs) + (N%Ck)*Cs"))
+            module.add(SLShiftRightB32(dst=sgpr(tM), src=sgpr(tM), shiftHex=hex(csShift),
+                                       comment="M / Cs"))
+            module.add(SLShiftRightB32(dst=sgpr(tN), src=sgpr(tN), shiftHex=hex(ckShift),
+                                       comment="N / Ck"))
+            module.add(SLShiftRightB32(dst=sgpr(t1), src=sgpr("NumWorkGroups0"),
+                                       shiftHex=hex(csShift), comment="nWG0 / Cs"))
+            module.add(SMulI32(dst=sgpr(tN), src0=sgpr(tN), src1=sgpr(t1),
+                               comment="(N/Ck) * (nWG0/Cs)"))
+            module.add(SAddU32(dst=sgpr(tN), src0=sgpr(tN), src1=sgpr(tM),
+                               comment="clusterId"))
+            module.add(SMulI32(dst=sgpr(tN), src0=sgpr(tN), src1=hex(C),
+                               comment="clusterId * C"))
+            module.add(SAddU32(dst=sgpr(sIdx), src0=sgpr(tN), src1=sgpr(t0),
+                               comment="skRank = clusterId*C + intra"))
+            module.add(done)
+        writer.vgprPool.checkIn(tmpVgpr)
+        self._commitStreamKIdx(writer, kernel, module, sIdx)
+        return module
+
+    def streamKMulticastBoundaryClear(self, writer, kernel):
+        """Drop DP multicast masks to self-only at the DP->SK boundary.
+
+        Target A multicasts both A and B in DP; SK partial-tile peers no longer
+        co-issue the identical full-K load, so both masks collapse to the self
+        bit (``maskA & maskB``). Inert unless Target A.
+        """
+        module = Module("StreamK multicast DP->SK boundary clear")
+        if not streamKDual2D(kernel):
+            return module
+        module.addComment0("Target A: clear BOTH A & B broadcast masks at DP->SK boundary")
+        module.add(SAndB32(dst=sgpr("MulticastMaskA"), src0=sgpr("MulticastMaskA"),
+                           src1=sgpr("MulticastMaskB"),
+                           comment="StreamKDual2DMulticast: clear BOTH A & B broadcast masks at DP->SK boundary: self = maskA & maskB (2-D cluster A/B peer sets meet at self)"))
+        module.add(SMovB32(dst=sgpr("MulticastMaskB"), src=sgpr("MulticastMaskA"),
+                           comment="DP->SK: drop A & B broadcast -> self-only (normal loads)"))
         return module
 
     def streamKReductionPadEarlyExit(self, writer, kernel):
@@ -3116,10 +3123,11 @@ class StreamKTwoTileDPFirst(StreamK):
         The launch grid X-extent is rounded up to Cs, so StreamKIdx in
         [Ck*tiles, launch) are padding. They ``s_endpgm`` here so WAVEDONE
         frees the -3 barrier slot before working peers arrive. skGrid (the
-        kernarg) is Ck*tiles and does not include that pad.
+        kernarg) is Ck*tiles and does not include that pad. Target A uses the
+        M/N pad-exit instead (``streamKClusterPadEarlyExit``).
         """
         module = Module("StreamK cluster reduction pad early-exit")
-        if not streamKClusterReduction(kernel):
+        if not (streamKClusterReduction(kernel) and not streamK2DMulticast(kernel)):
             return module
         _cs, ck, _c, _is2d = streamKClusterFactors(kernel)
         module.addComment1("Stream-K cluster reduction: exit padded peers (StreamKIdx >= Ck*tiles)")
@@ -3172,9 +3180,10 @@ class StreamKTwoTileDPFirst(StreamK):
         #   StreamKIdx = WorkGroup2*(nWG0*nWG1) + WorkGroup1*nWG0 + WorkGroup0
         # written into WorkGroup0 so the save below copies the final index. A 1-D
         # [Cs, 1] cluster launches the same 2-D grid, so it folds identically.
-        # ForceDPOnly=0 instead folds the cluster Y rank into the linear StreamK
+        # Target A (ForceDPOnly=0 [Cs,Ck]) uses this same M-fastest fold for DP.
+        # Pure [1,C] instead folds the cluster Y rank into the linear StreamK
         # index: StreamKIdx = WorkGroup0*Ck + WorkGroup1 (k = WorkGroup1 fastest).
-        if streamKMulticast(kernel) and kernel["StreamKForceDPOnly"]:
+        if streamKMulticast(kernel) and (kernel["StreamKForceDPOnly"] or streamK2DMulticast(kernel)):
             with writer.allocTmpSgpr(2, tag="ClusterDPFold") as tRes:
                 t0 = tRes.idx
                 t1 = tRes.idx + 1
@@ -3207,8 +3216,9 @@ class StreamKTwoTileDPFirst(StreamK):
         # the cluster-barrier pass's first-load wait.
         #
         # ForceDPOnly has already dropped its no-work peers in
-        # streamKClusterPadEarlyExit above, so it arrives here. ForceDPOnly=0
-        # defers the arrive until after streamKReductionPadEarlyExit below.
+        # streamKClusterPadEarlyExit above, so it arrives here. Target A skips
+        # this once-only arrive: the SK tail re-enters the persistent loop, so
+        # the arrive is emitted per pass in graWorkGroup instead.
         if streamKMulticast(kernel) and kernel["StreamKForceDPOnly"]:
             module.add(self.streamKMulticastPrologueSignal(writer, kernel))
 
@@ -3230,12 +3240,9 @@ class StreamKTwoTileDPFirst(StreamK):
             module.add(writer.longBranchScc0(Label("KernelEnd", ""), posNeg=1))
             return module
 
-        # ForceDPOnly=0 cluster: drop padded StreamKIdx >= Ck*tiles peers before
-        # any -3 arrive, then (factored multicast only) rewrite MaskB and arrive.
+        # ForceDPOnly=0 [1,C]: drop padded StreamKIdx >= Ck*tiles peers before
+        # any -3 arrive. Target A already pad-exited on M/N coords above.
         module.add(self.streamKReductionPadEarlyExit(writer, kernel))
-        module.add(self.streamKFactoredMaskCompute(writer, kernel))
-        if streamKMulticast(kernel):
-            module.add(self.streamKMulticastPrologueSignal(writer, kernel))
 
         # Two-tile SK (DP first)
         # Do DP tiles before SK
@@ -3365,6 +3372,7 @@ class StreamKTwoTileDPFirst(StreamK):
             if skConstsInVgprs:
                 module.add(VReadfirstlaneB32(dst=sgpr(sIdx), src=vgpr(writer.states.skConstVgprs["StreamKIdx"])))
                 module.add(VReadfirstlaneB32(dst=sgpr(sIpw), src=vgpr(writer.states.skConstVgprs["SKItersPerWG"])))
+            module.add(self.streamKDual2DRemapSkIdx(writer, kernel, sIdx))
             module.add(SMulI32(dst=sgpr("StreamKIter"), src0=sgpr(sIdx), src1=sgpr(sIpw), comment="StreamK starting iteration (case: after extra iters)"))
             module.add(SAddU32(dst=sgpr("StreamKIter"), src0=sgpr("StreamKIter"), src1=sgpr(sSkExtraIters), comment="Add extra iters"))
             module.add(SAddU32(dst=sgpr("StreamKIterEnd"), src0=sgpr("StreamKIter"), src1=sgpr(sIpw), comment="StreamK ending iteration (case: after extra iters)"))
@@ -3500,6 +3508,7 @@ class StreamKTwoTileDPFirst(StreamK):
                 sItersPerWg = sIter
             else:
                 sItersPerWg = "SKItersPerWG"
+            module.add(self.streamKDual2DRemapSkIdx(writer, kernel, sIdx))
             module.add(SMulI32(dst=sgpr("StreamKIter"), src0=sgpr(sIdx), src1=sgpr(sItersPerWg), comment="StreamK starting iteration (case: after extra iters)"))
             module.add(SAddU32(dst=sgpr("StreamKIter"), src0=sgpr("StreamKIter"), src1=sgpr(sSkExtraIters), comment="Add extra iters"))
             module.add(SAddU32(dst=sgpr("StreamKIterEnd"), src0=sgpr("StreamKIter"), src1=sgpr(sItersPerWg), comment="StreamK ending iteration (case: after extra iters)"))
@@ -3522,6 +3531,10 @@ class StreamKTwoTileDPFirst(StreamK):
             # check if this WG has no work to do
             module.add(SCmpLtU32(src0=sgpr("StreamKIter"), src1=sgpr(sTotalIters), comment="Make sure there's work to do"))
         module.add(writer.longBranchScc0(Label("KernelEnd", ""), posNeg=1))
+
+        # DP->SK boundary: drop both multicast masks to self-only so SK loads
+        # are ordinary per-workgroup. Reached only on the DP->SK switch path.
+        module.add(self.streamKMulticastBoundaryClear(writer, kernel))
 
         # If in SK, next iteration is sTmp+2
         # Increment StreamK iteration
@@ -3547,6 +3560,13 @@ class StreamKTwoTileDPFirst(StreamK):
         module.add(SMovB32(dst=sgpr("StreamKLocalEnd"), src=sgpr(sIpt), comment="Skip iterations"))
         writer.releaseStreamKConstSgpr(sIpt)
         module.add(alphaLabel)
+
+        # Target A: emit the cluster multicast arrive PER PERSISTENT PASS here,
+        # on the main-loop path, so it pairs this pass's first-load wait. The
+        # pre-loop arrive is skipped for this path. SK-tail cluster reduction
+        # uses a later -3 round after partials are written.
+        if streamKDual2D(kernel):
+            module.add(self.streamKMulticastPrologueSignal(writer, kernel))
 
         writer.sgprPool.checkIn(sTmp)
 

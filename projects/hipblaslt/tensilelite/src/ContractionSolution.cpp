@@ -972,10 +972,11 @@ namespace TensileLite
                     uint32_t sk3_skItersPerWG;
                     uint32_t sk3_skTiles;
                     size_t   ckSplit = static_cast<size_t>(sizeMapping.clusterDim.y);
-                    if(sizeMapping.streamKForceDPOnly == 0 && ckSplit > 1
+                    size_t   csSplit = static_cast<size_t>(sizeMapping.clusterDim.x);
+                    if(sizeMapping.streamKForceDPOnly == 0 && csSplit == 1 && ckSplit > 1
                        && (sk3_itersPerTile % ckSplit) == 0)
                     {
-                        // Cluster reduction: every tile is split Ck ways.
+                        // Pure [1,C] cluster reduction: every tile is split Ck ways.
                         // sk.grid is Ck*tiles (unrounded); extraIters is 0.
                         sk3_skItersPerWG
                             = static_cast<uint32_t>(sk3_itersPerTile)
@@ -1047,10 +1048,11 @@ namespace TensileLite
 
                 // Stream-K 3 uses the two-tile ABI.
                 size_t ckSplit = static_cast<size_t>(sizeMapping.clusterDim.y);
-                if(sizeMapping.streamKForceDPOnly == 0 && ckSplit > 1
+                size_t csSplit = static_cast<size_t>(sizeMapping.clusterDim.x);
+                if(sizeMapping.streamKForceDPOnly == 0 && csSplit == 1 && ckSplit > 1
                    && (itersPerTile % ckSplit) == 0)
                 {
-                    // Cluster reduction: every tile is split Ck ways.
+                    // Pure [1,C] cluster reduction: every tile is split Ck ways.
                     // sk.grid is Ck*tiles (unrounded); extraIters is 0.
                     uint32_t skItersPerWG
                         = static_cast<uint32_t>(itersPerTile) / static_cast<uint32_t>(ckSplit);
@@ -1957,13 +1959,26 @@ namespace TensileLite
                 // rv.numWorkGroups.y already = nWG1 * gsu (N-tiles); z stays batch.
             }
             else if(sizeMapping.streamK == 3 && sizeMapping.streamKForceDPOnly == 0
+                    && sizeMapping.clusterDim.x > 1 && sizeMapping.clusterDim.y > 1)
+            {
+                // Target A: persistent 2-D cluster grid [nWG0, gridY, batch].
+                // gridX is pinned to nWG0 so the kernel's DP fold
+                // StreamKIdx = WorkGroup1*nWG0 + WorkGroup0 keeps Cs X-peers
+                // M-adjacent (share B) and Ck Y-peers N-adjacent (share A).
+                // gridY = sk.grid / nWG0 is a multiple of Ck (getSKGridImpl).
+                rv.numWorkGroups.x = problemNumGroupTiles.x; // nWG0
+                rv.numWorkGroups.y = problemNumGroupTiles.x > 0
+                                         ? sk.grid / problemNumGroupTiles.x
+                                         : 1; // gridY
+                rv.numWorkGroups.z = problemNumGroupTiles.z; // batch
+            }
+            else if(sizeMapping.streamK == 3 && sizeMapping.streamKForceDPOnly == 0
                     && sizeMapping.clusterDim.y > 1)
             {
-                // ForceDPOnly=0 cluster reduction [Cs, Ck] with Ck = clusterDim.y:
-                // launch a 2-D grid so the cluster Y-extent is legal (gridDimY % Ck
-                // == 0) and every WG gets a unique index via
-                // StreamKIdx = WorkGroup0*Ck + WorkGroup1. sk.grid is Ck*tiles, so
-                // gridDimX = tiles; RoundUpToMultiple below pads X to a Cs multiple.
+                // ForceDPOnly=0 pure [1,C] cluster reduction: launch a 2-D grid
+                // so the cluster Y-extent is legal (gridDimY % Ck == 0) and every
+                // WG gets a unique index via StreamKIdx = WorkGroup0*Ck + WorkGroup1.
+                // sk.grid is Ck*tiles, so gridDimX = tiles.
                 uint32_t ck        = static_cast<uint32_t>(sizeMapping.clusterDim.y);
                 rv.numWorkGroups.x = sk.grid / ck;
                 rv.numWorkGroups.y = ck;
@@ -2000,17 +2015,24 @@ namespace TensileLite
         // peers' broadcast masks are trimmed to the present lanes
         // (computeMulticastMaskReduction).
         //
-        // ForceDPOnly cluster multicast pads the M x N tile grid; ForceDPOnly=0
-        // cluster reduction pads the [skGrid/Ck, Ck] grid. Both have a kernel
+        // ForceDPOnly cluster multicast pads the M x N tile grid; Target A
+        // pads the persistent [nWG0, gridY] grid the same way; ForceDPOnly=0
+        // [1,C] pads the [skGrid/Ck, Ck] grid. All three have a kernel
         // pad-exit before the -3 cluster barrier. A ForceDPOnly=0 [Cs,1]
         // (non-multicast) Stream-K cluster keeps develop's 1-D sk.grid launch.
         bool skClusterMulticast = sizeMapping.streamK != 0
                                   && sizeMapping.streamKForceDPOnly != 0 && enableCluster;
+        bool skClusterDual2D    = sizeMapping.streamK == 3
+                                  && sizeMapping.streamKForceDPOnly == 0
+                                  && sizeMapping.clusterDim.x > 1
+                                  && sizeMapping.clusterDim.y > 1;
         bool skClusterReduction = sizeMapping.streamK == 3
                                   && sizeMapping.streamKForceDPOnly == 0
+                                  && sizeMapping.clusterDim.x == 1
                                   && sizeMapping.clusterDim.y > 1;
         if(enableCluster
-           && (sizeMapping.streamK == 0 || skClusterMulticast || skClusterReduction))
+           && (sizeMapping.streamK == 0 || skClusterMulticast || skClusterDual2D
+               || skClusterReduction))
         {
             rv.numWorkGroups.x = RoundUpToMultiple(rv.numWorkGroups.x, rv.clusterDim.x);
             rv.numWorkGroups.y = RoundUpToMultiple(rv.numWorkGroups.y, rv.clusterDim.y);
@@ -4476,16 +4498,39 @@ namespace TensileLite
                 skGrid = tiles;
             }
 
-            // StreamK ForceDPOnly=0 cluster reduction: every tile is split Ck
-            // ways, so skGrid == Ck*tiles. The launch rounds gridX up to Cs;
-            // padded WGs pad-exit in the kernel prologue. Pure reduction [1,C]
-            // is Ck==C so this is C*tiles; factored [Cs,Ck] is Ck K-peers per
-            // tile, with Cs spatial tiles sharing a cluster.
+            // StreamK ForceDPOnly=0 pure [1,C] cluster reduction: every tile is
+            // split Ck ways, so skGrid == Ck*tiles. The launch rounds gridX up
+            // to Cs; padded WGs pad-exit in the kernel prologue.
             if(self.sizeMapping.streamK == 3 && self.sizeMapping.streamKForceDPOnly == 0
-               && self.sizeMapping.clusterDim.y > 1)
+               && self.sizeMapping.clusterDim.x == 1 && self.sizeMapping.clusterDim.y > 1)
             {
                 size_t ck = static_cast<size_t>(self.sizeMapping.clusterDim.y);
                 skGrid    = ck * tiles;
+            }
+
+            // Target A: SK3 ForceDPOnly=0 [Cs,Ck] both > 1. Reshape the origami /
+            // CU-budget skGrid into a persistent 2-D cluster grid [nWG0, gridY]
+            // so DP multicast is spatial (Cs M-adjacent, Ck N-adjacent) while a
+            // genuine SK remainder remains whenever nWG1 % gridY != 0.
+            if(self.sizeMapping.streamK == 3 && self.sizeMapping.streamKForceDPOnly == 0
+               && self.sizeMapping.clusterDim.x > 1 && self.sizeMapping.clusterDim.y > 1)
+            {
+                size_t ck = static_cast<size_t>(self.sizeMapping.clusterDim.y);
+                dim3   tilesMN;
+                dim3   dummyWg;
+                self.calculateGrid(dummyWg, tilesMN, problem);
+                size_t nwg0   = tilesMN.x;
+                size_t nwg1   = tilesMN.y;
+                size_t nwg1Ck = (nwg1 / ck) * ck;
+                if(nwg1Ck < ck)
+                    nwg1Ck = ck;
+                size_t gridY = nwg0 > 0 ? (skGrid + nwg0 - 1) / nwg0 : ck;
+                gridY        = ((gridY + ck - 1) / ck) * ck;
+                if(gridY < ck)
+                    gridY = ck;
+                if(gridY > nwg1Ck)
+                    gridY = nwg1Ck;
+                skGrid = nwg0 * gridY;
             }
 
             return skGrid;
