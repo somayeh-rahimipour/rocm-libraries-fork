@@ -41,6 +41,7 @@
 #include "stinkytofu/transforms/asm/EstimateAsmCyclesPass.hpp"
 #include "stinkytofu/transforms/asm/FlattenCalleesPass.hpp"
 #include "stinkytofu/transforms/asm/Gfx1250HazardPass.hpp"
+#include "stinkytofu/transforms/asm/InsertAsanCheckPass.hpp"
 #include "stinkytofu/transforms/asm/InsertClusterBarrierPass.hpp"
 #include "stinkytofu/transforms/asm/InsertCoexecHazardPass.hpp"
 #include "stinkytofu/transforms/asm/InsertDelayAluPass.hpp"
@@ -192,6 +193,16 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
         // branches/labels are present when MSB configuration is materialized.
         if (moduleOptions.ClusterBarrier) {
             pm.addPass(createInsertClusterBarrierPass());
+        }
+
+        // Debug-only ASan shadow-memory bounds checks. Kernel scope, and like the
+        // cluster barrier it must precede InsertVgprMsbPass so its new
+        // branches/labels get MSB configuration. Runs after the region passes so
+        // the DAG scheduler cannot reorder the check away from its access, and
+        // emits its own s_wait_loadcnt since the region-scope
+        // StinkyWaitCntInsertionPass has already run by this point.
+        if (moduleOptions.AsanInstrument) {
+            pm.addPass(createInsertAsanCheckPass());
         }
 
         // Build the CFG after the flat region splice-backs so RegionClonePass can match its

@@ -33,6 +33,7 @@ target_sources(stinkytofu_objs PRIVATE
     InsertVgprMsbPass.cpp
     InsertInitialUnclausedVmemPass.cpp
     InsertClusterBarrierPass.cpp
+    InsertAsanCheckPass.cpp
     RaiseVgprMsbPass.cpp
     RemoveDelayAluPass.cpp
     RemoveInstructionPass.cpp
