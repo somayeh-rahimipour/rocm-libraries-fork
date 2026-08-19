@@ -14,12 +14,21 @@ _metadata = runpy.run_path(str(Path(__file__).with_name("release_metadata.py")))
 
 def _build_rocm_version() -> str:
     value = os.environ.get("TENSILELITE_ROCM_VERSION")
-    if not value:
-        raise RuntimeError(
-            "TENSILELITE_ROCM_VERSION=X.Y.Z is required to build a TensileLite wheel. "
-            "Use the CMake or Invoke build frontend, or supply the selected SDK base version explicitly."
-        )
-    return value
+    if value:
+        return value
+    if os.environ.get("TOX_ENV_NAME"):
+        version_file = Path(os.environ.get("ROCM_PATH", "/opt/rocm")) / ".info" / "version"
+        try:
+            return version_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(
+                "Tox package setup requires TENSILELITE_ROCM_VERSION or a selected "
+                f"ROCM_PATH containing {version_file.relative_to(version_file.parent.parent)}."
+            ) from exc
+    raise RuntimeError(
+        "TENSILELITE_ROCM_VERSION=X.Y.Z is required to build a TensileLite wheel. "
+        "Use the CMake or Invoke build frontend, or supply the selected SDK base version explicitly."
+    )
 
 
 class CleanBuildPy(build_py):
