@@ -38,7 +38,7 @@ Optimization Workflow:
 ```
 hipBLASLt Logs → Configure → Optimize   →    Benchmark → Filter → Merge
       ↓             ↓           ↓               ↓          ↓        ↓
-  YAML logs      Tensile     Tuning         Performance  Final   hipBLASLt
+  YAML logs      TensileLite     Tuning         Performance  Final   hipBLASLt
                  Configs  (Ductile or full)   Analysis   Library Integration
 ```
 
@@ -93,7 +93,7 @@ geko/
 │   ├── library.py      # Library and LibraryCollection classes
 │   ├── operations.py   # Library loading, merging, creation, etc.
 │   └── _bank.py        # Solution bank utilities
-├── config_generator/   # Tensile configuration generation utilities
+├── config_generator/   # TensileLite configuration generation utilities
 │   ├── config.yaml     # Example configuration template
 │   ├── config_generator.py
 │   ├── config_merger.py
@@ -135,7 +135,7 @@ workdir/
 ├── summary.csv                    # GEMM contribution analysis
 ├── gemms.csv                      # Extracted unique GEMMs
 ├── optimizations/                 # Phase 1: Configuration output
-│   ├── BBS_TN_0.yaml              # Tensile config for GEMM type
+│   ├── BBS_TN_0.yaml              # TensileLite config for GEMM type
 │   ├── BBS_TN_0.sh                # Execution script
 │   ├── F8BS_TN_1.yaml             # Another GEMM configuration
 │   ├── ...
@@ -147,7 +147,7 @@ workdir/
 │       └── *-optimization.log     # Optimization logs
 ├── libs/                          # Merged optimized libraries
 │   └── *.yaml                     # Individual library per GEMM type
-├── tensile/library/*.dat          # Compiled Tensile libraries
+├── tensile/library/*.dat          # Compiled TensileLite libraries
 ├── benchmarks/                    # Benchmark configurations
 │   ├── *_bench.yaml               # Generated benchmark inputs
 │   └── *_verify.yaml              # Verification inputs
@@ -173,7 +173,7 @@ workdir/
 │   └── failed_jobs.log            # Failed benchmark log
 ├── libs/                          # Extracted winning kernels
 │   └── *.yaml                     # Individual library per GEMM type
-├── tensile/library/*.dat          # Compiled Tensile libraries
+├── tensile/library/*.dat          # Compiled TensileLite libraries
 ├── benchmarks/                    # Benchmark configurations
 │   └── *_bench.yaml               # Generated benchmark inputs
 ├── results/                       # Performance analysis
@@ -305,6 +305,7 @@ From the GEKO package root you can also run the driver without installing (same 
 For the full flag list with descriptions and defaults, see [CLI Reference](#cli-reference).
 
 Required packages (see `requirements.txt` for pinned versions):
+- `tensilelite` - Kernel generation and library manipulation APIs
 - `pyyaml` - YAML parsing
 - `pandas` - Data manipulation and tabular data operations
 - `numpy` - Numerical array operations
@@ -336,7 +337,7 @@ HIPBLASLT_PATH=~/rocm-libraries/projects/hipblaslt tox -e integration
 HIPBLASLT_PATH=~/rocm-libraries/projects/hipblaslt tox -e integration -- --skip-slow
 ```
 
-Tests that require Tensile/`rocisa` are skipped (not errored) when `rocisa` is not
+Tests that require TensileLite/`rocisa` are skipped (not errored) when `rocisa` is not
 importable, so the hermetic subset still runs in a bare environment.
 
 Integration tests need a hipBLASLt repo and (in some cases) a tuning config and/or a workload log. Pass these via custom pytest options:
@@ -495,7 +496,7 @@ The full template (StreamK, GA, MI filtering, `SIZE_OPTION=1` grid mode, etc.) l
 
 ### 1. GA-based Optimization
 
-Tunes new kernel parameters using a Genetic Algorithm (via Ductile) or exhaustive Tensile grid search. Produces the highest performance gains but takes hours.
+Tunes new kernel parameters using a Genetic Algorithm (via Ductile) or exhaustive TensileLite grid search. Produces the highest performance gains but takes hours.
 
 #### Option A: Single CLI command
 
@@ -530,7 +531,7 @@ my_optimization/
 ├── hipblaslt-log-mask64.yaml / hipblaslt-log-mask64.out  # Baseline benchmark
 ├── summary.csv / gemms.csv           # GEMM contribution analysis
 └── optimizations/
-    ├── BBS_TN_0.yaml                 # Tensile config per GEMM type
+    ├── BBS_TN_0.yaml                 # TensileLite config per GEMM type
     ├── BBS_TN_0.sh
     └── ...
 ```
@@ -576,7 +577,7 @@ Output:
 my_optimization/
 ├── optimizations/build_*/            # Per-GEMM tuning results and logs
 ├── libs/                             # Merged libraries
-├── tensile/library/*.dat             # Compiled Tensile libraries
+├── tensile/library/*.dat             # Compiled TensileLite libraries
 ├── benchmarks/                       # Benchmark inputs
 ├── results/raw_results.csv / final_results.csv
 └── final_libs/                       # Ready for integration
@@ -589,15 +590,26 @@ my_optimization/
 HIPBLASLT_PATH="/path/to/rocm-libraries/projects/hipblaslt"
 LIBRARY_DIR="${HIPBLASLT_PATH}/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/Equality/"
 
-${HIPBLASLT_PATH}/tensilelite/tensilelite/bin/TensileMergeLibrary \
-  --no_eff --force_merge True \
-  "${LIBRARY_DIR}" my_optimization/final_libs "${LIBRARY_DIR}"
+python - <<PY
+from tensilelite.merge_library import avoidRegressions
+
+avoidRegressions(
+    "${LIBRARY_DIR}",
+    "my_optimization/final_libs",
+    "${LIBRARY_DIR}",
+    forceMerge=True,
+    noEff=True,
+)
+PY
 
 cd "${HIPBLASLT_PATH}"
 invoke build --install-deps --clients --architecture gfx950 --skip-rocroller
 ```
 
-`TensileMergeLibrary` arguments: `--no_eff` skips efficiency calculations; `--force_merge True` forces merge on conflicts; the three positional args are original dir, new libs dir, output dir (same as original to update in place).
+`avoidRegressions` skips efficiency calculations with `noEff=True` and forces
+merge on conflicts with `forceMerge=True`; its three path arguments are the
+original directory, new-libraries directory, and output directory (the original
+directory above, to update in place).
 
 **Verify:**
 ```bash
@@ -671,7 +683,8 @@ my_search/
 
 #### Integrate
 
-Same steps as GA Optimization — run `TensileMergeLibrary` then rebuild hipBLASLt with the contents of `my_search/final_libs`.
+Same steps as GA Optimization — call `tensilelite.merge_library.avoidRegressions`
+then rebuild hipBLASLt with the contents of `my_search/final_libs`.
 
 ---
 
@@ -738,7 +751,7 @@ results = bench.compare(
 Orchestrates multi-GPU kernel optimization.
 
 **Key Functions:**
-- `optim.configure()` - Generate Tensile configurations
+- `optim.configure()` - Generate TensileLite configurations
 - `optim.run()` - Execute multi-GPU optimization
 - `optim.analyze()` - Benchmark and filter optimized kernels
 
@@ -876,7 +889,7 @@ library.from_dataframe(results, "workdir/libs").dump("workdir/final_libs")
 
 ### `geko.library` - Library Management Module
 
-Manages Tensile library loading, merging, and manipulation.
+Manages TensileLite library loading, merging, and manipulation.
 
 **Key Classes:**
 - `Library` - Represents a single kernel library
@@ -887,7 +900,7 @@ Manages Tensile library loading, merging, and manipulation.
 - `library.operations.load_collection()` - Load directory of libraries
 - `library.operations.merge_solutions()` - Merge optimized solutions
 - `library.operations.extract_solutions()` - Extract solutions by solution index from a DataFrame
-- `library.operations.create()` - Call TensileCreateLibrary
+- `library.operations.create()` - Call tensilelite_create_library
 - `library.operations.from_dataframe()` - Create libraries from filtered results
 - `library.operations.prune_library()` - Trim a library to its minimum required solutions, without losing performance
 
@@ -945,12 +958,12 @@ Defines typed data structures with validation.
 ```python
 from geko.schemas import GemmType, GemmConfig
 
-# Prefer factory constructors (they keep Tensile + hipBLASLt fields consistent).
+# Prefer factory constructors (they keep TensileLite + hipBLASLt fields consistent).
 gemm_type = GemmType.from_hipblaslt(
     "T", "N", "f16_r", "f16_r", "f16_r", "f32_r"
 )
-# Or from tensilelite YAML codes only:
-# gemm_type = GemmType.from_tensile("N", "T", "H", "H", "S")
+# Or from TensileLite YAML codes only:
+# gemm_type = GemmType.from_tensilelite("N", "T", "H", "H", "S")
 
 gemm_config = GemmConfig(
     gemm_type=gemm_type,
@@ -1329,4 +1342,3 @@ If you want to submit an issue, you can do so on
 ## License
 
 MIT License. Copyright (C) Advanced Micro Devices, Inc.
-
