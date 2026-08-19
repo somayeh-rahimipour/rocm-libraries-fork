@@ -82,9 +82,15 @@ venv="$workdir/venv"
 "$python" -m venv "$venv"
 "$venv/bin/python" -m pip install --quiet --force-reinstall --no-deps "$whl"
 ld_parts=()
-[ -n "${ORIGAMI_RUNTIME_LIB_DIR:-}" ] && ld_parts+=("$ORIGAMI_RUNTIME_LIB_DIR")
-[ -n "${CMAKE_PREFIX_PATH:-}" ] && ld_parts+=("${CMAKE_PREFIX_PATH}/lib")
-[ -n "${LD_LIBRARY_PATH:-}" ] && ld_parts+=("$LD_LIBRARY_PATH")
+
+if [ -n "${ORIGAMI_RUNTIME_LIB_DIR:-}" ]; then
+    ld_parts+=("$ORIGAMI_RUNTIME_LIB_DIR")
+fi
+
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    ld_parts+=("$LD_LIBRARY_PATH")
+fi
+
 if [ ${#ld_parts[@]} -gt 0 ]; then
     export LD_LIBRARY_PATH="$(IFS=:; echo "${ld_parts[*]}")"
 fi
