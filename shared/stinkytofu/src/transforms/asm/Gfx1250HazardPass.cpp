@@ -231,7 +231,8 @@ class Gfx1250HazardPass : public Pass {
 
     PreservedAnalyses run(Function& func, PassContext& passCtx, AnalysisManager& /*AM*/) override {
         const auto& caps = passCtx.getAsmCapsConfig();
-        // Run if `RequiresXCntForVolatileVMEM` or `EnableXnackReplay` is set.
+        // Run if either flag is set: `RequiresXCntForVolatileVMEM` (atomics only) or
+        // `EnableXnackReplay` (full replay protection including atomics).
         if (!caps.requiresXCntForVolatileVMEM && !caps.enableXnackReplay) {
             return preserveCFGAnalyses();
         }
@@ -240,7 +241,7 @@ class Gfx1250HazardPass : public Pass {
 
         const GfxArchID archId = getGfxArchID(arch[0], arch[1], arch[2]);
         auto profile = makeXcntDrainProfile(enableXcntDrainProfile);
-        runOnFunction(func, archId, *profile, caps.requiresXCntForVolatileVMEM);
+        runOnFunction(func, archId, *profile, caps.enableXnackReplay);
         profile->print();
         return preserveCFGAnalyses();
     }
@@ -263,7 +264,7 @@ class Gfx1250HazardPass : public Pass {
     static void applySingleGroupXnackReplayFix(BasicBlock& bb, BasicBlock::iterator it,
                                                AsmIRBuilder& builder, GfxArchID archId,
                                                GroupState& state, XcntDrainProfileBase& profile,
-                                               bool requiresXCntForVolatileVMEM) {
+                                               bool enableXnackReplay) {
         auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
         if (inst == nullptr || isPseudoInst(inst)) return;
 
@@ -344,31 +345,34 @@ class Gfx1250HazardPass : public Pass {
 
         // Rule 4(a): the first atomic after non-atomic memory must start
         // with XCNT == 0. This drain clears state before Rule 2 runs below.
-        // Only enforced when `RequiresXCntForVolatileVMEM` is set; `EnableXnackReplay`
-        // alone does not protect atomics.
-        const bool needsRule4aDrain = requiresXCntForVolatileVMEM && atomic && state.hasNonAtomic;
+        // Active under both `RequiresXCntForVolatileVMEM` and `EnableXnackReplay`
+        // (the pass only runs when at least one is set).
+        const bool needsRule4aDrain = atomic && state.hasNonAtomic;
         if (needsRule4aDrain) {
             insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::AtomicRule4a);
         }
 
-        // Apply rule 3:
-        if (kind == MemoryGroupKind::SMEM && returnsMultipleDwords(*inst) &&
-            hasSelfDestSourceOverlap(*inst)) {
-            reportUnrepairableSmemSelfOverlap(bb, *inst);
-        }
+        // Rules 2 and 3 (source-clobber protection) require full replay support.
+        // `RequiresXCntForVolatileVMEM` alone only protects atomics (Rule 4).
+        if (enableXnackReplay) {
+            if (kind == MemoryGroupKind::SMEM && returnsMultipleDwords(*inst) &&
+                hasSelfDestSourceOverlap(*inst)) {
+                reportUnrepairableSmemSelfOverlap(bb, *inst);
+            }
 
-        if (kind == MemoryGroupKind::SMEM && violatesSmemSourceRule(*inst, state)) {
-            warnGroupBreak(bb, *inst, "SMEM");
-            insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::SmemRule3);
-        }
+            if (kind == MemoryGroupKind::SMEM && violatesSmemSourceRule(*inst, state)) {
+                warnGroupBreak(bb, *inst, "SMEM");
+                insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::SmemRule3);
+            }
 
-        // Rule 2 applies only to non-atomic FLAT. Rule 4 already handled the
-        // first atomic and permits a consecutive atomic run.
-        const bool violatesRule2 = kind == MemoryGroupKind::VMEM && isFlat(*inst) && !atomic &&
-                                   violatesFlatSourceRule(*inst, state);
-        if (violatesRule2) {
-            warnGroupBreak(bb, *inst, "FLAT");
-            insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::FlatRule2);
+            // Rule 2 applies only to non-atomic FLAT. Rule 4 already handled the
+            // first atomic and permits a consecutive atomic run.
+            const bool violatesRule2 = kind == MemoryGroupKind::VMEM && isFlat(*inst) && !atomic &&
+                                       violatesFlatSourceRule(*inst, state);
+            if (violatesRule2) {
+                warnGroupBreak(bb, *inst, "FLAT");
+                insertXcntDrain(builder, archId, inst, state, profile, XcntDrainReason::FlatRule2);
+            }
         }
 
         // Only VMEM and SMEM retain replay state.
@@ -385,7 +389,7 @@ class Gfx1250HazardPass : public Pass {
 
    public:
     static void runOnFunction(Function& func, GfxArchID archId, XcntDrainProfileBase& profile,
-                              bool requiresXCntForVolatileVMEM) {
+                              bool enableXnackReplay) {
         profile.beginFunction(func);
 
         GroupState state;
@@ -400,7 +404,7 @@ class Gfx1250HazardPass : public Pass {
             AsmIRBuilder builder(bb, archId);
             for (auto it = bb.begin(); it != bb.end(); ++it) {
                 applySingleGroupXnackReplayFix(bb, it, builder, archId, state, profile,
-                                               requiresXCntForVolatileVMEM);
+                                               enableXnackReplay);
             }
             previous = &bb;
         }
@@ -434,8 +438,7 @@ class Gfx1250HazardModulePass : public ModulePass {
         auto profile = makeXcntDrainProfile(enableXcntDrainProfile);
         for (Function* f : M.getFunctions())
             if (f && !f->empty())
-                Gfx1250HazardPass::runOnFunction(*f, archId, *profile,
-                                                 caps.requiresXCntForVolatileVMEM);
+                Gfx1250HazardPass::runOnFunction(*f, archId, *profile, caps.enableXnackReplay);
         profile->print();
         return PreservedAnalyses::all();
     }
