@@ -22,8 +22,9 @@
 
 from typing import Optional, OrderedDict, Callable
 import sys
+import os
 
-sys.path.append(f"../")
+sys.path.append(f"{os.path.dirname(__file__)}/../")
 
 from utils import TYPE_CONFIGS
 from tuner.base_tuner import BaseTuner, TunerArgs, COMMON_KEY_TYPES
