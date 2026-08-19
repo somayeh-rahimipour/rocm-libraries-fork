@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "default:release",
+      "displayName": "Configure release build with installation to /opt/rocm",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/rocm-clang.cmake",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "/opt/rocm"
+      }
+    },
+    {
+      "name": "python",
+      "displayName": "Release build with Python bindings and tests",
+      "inherits": "default:release",
+      "cacheVariables": {
+        "ORIGAMI_ENABLE_PYTHON": "ON",
+        "ORIGAMI_BUILD_TESTING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default:release",
+      "configurePreset": "default:release"
+    },
+    {
+      "name": "python",
+      "configurePreset": "python"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "python",
+      "configurePreset": "python",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
