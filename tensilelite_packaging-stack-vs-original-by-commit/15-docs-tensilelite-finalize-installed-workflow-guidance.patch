@@ -1,0 +1,134 @@
+diff --git a/.github/workflows/component-ci-tensilelite-coverage.yml b/.github/workflows/component-ci-tensilelite-coverage.yml
+index 20ed7fd6775f285c5038eb4aa1135e1cbabcf0bf..7b78d96dce139aa6902eb240134d4a626c840060 100644
+--- a/.github/workflows/component-ci-tensilelite-coverage.yml
++++ b/.github/workflows/component-ci-tensilelite-coverage.yml
+@@ -52,8 +52,8 @@ jobs:
+       # per-suite reports (char.json / unit.json) that feed the split-summary
+       # card below - no duplicate runs. This step measures only; the floors are
+       # enforced by the coverage-gate step that follows.
+-      # No GPU or client build is needed - coverage-unit skips the client build;
+-      # the compiler env below is only so rocisa builds during the tox run.
++      # coverage-unit builds and configures the client before its tests; the
++      # compiler environment below is also required for rocisa during the tox run.
+       #
+       # PATH must include the ROCm toolchain bin dirs: setup-rocm sets ROCM_PATH
+       # but not PATH, and several characterization tests resolve the assembler
+diff --git a/projects/hipblaslt/CONTRIBUTING.md b/projects/hipblaslt/CONTRIBUTING.md
+index ba03523dff3869df122bf01c18bc83dbb60ebc63..12d685b480e0426630d1eff50eea5a7337f3edbf 100644
+--- a/projects/hipblaslt/CONTRIBUTING.md
++++ b/projects/hipblaslt/CONTRIBUTING.md
+@@ -56,7 +56,7 @@ hipBLASLt uses a **build-time** generator (Tensile, in-repo) to produce GPU kern
+ 
+ ### Python environment for building device libraries
+ 
+-The `tensilelite-device-libraries` target runs a Python script (`Tensile.tensilelite_create_library`) that needs PyYAML, msgpack, etc. The build does not install them; it uses whatever Python CMake found. **Use a venv and install the Tensile requirements** so both the device-library step and the test-data generator (which also uses Python) have the right deps:
++The `tensilelite-device-libraries` target invokes `python -m tensilelite create-library`, which needs PyYAML, msgpack, etc. The build does not install them; it uses whatever Python CMake found. **Use a venv and install the TensileLite requirements** so both the device-library step and the test-data generator (which also uses Python) have the right deps:
+ 
+ ```bash
+ cd projects/hipblaslt
+diff --git a/projects/hipblaslt/tensilelite/AGENTS.md b/projects/hipblaslt/tensilelite/AGENTS.md
+index 31b6621807fd32fdff87dddc16b0c3f62f93b43a..354c423587ff4f2d5fd9161d1bb018f673866257 100644
+--- a/projects/hipblaslt/tensilelite/AGENTS.md
++++ b/projects/hipblaslt/tensilelite/AGENTS.md
+@@ -108,7 +108,7 @@ Use the `users/<github-username>/<branch-name>` branch convention and base PRs o
+ 
+ 3. **ClientWriter** (`tensilelite/ClientWriter.py`): Wraps the selected kernels in a C++ library and generates the benchmark client. Output: `4_LibraryClient/`.
+ 
+-Entry point: `python -m tensilelite run` → `tensilelite/tensilelite.py:Tensile()` → `executeStepsInConfig()`.
++Entry point: `python -m tensilelite run` → `tensilelite/tensilelite.py:tensilelite()` → `executeStepsInConfig()`.
+ 
+ ### Key Python Modules
+ 
+@@ -145,7 +145,7 @@ invoke rocisa            # editable pip install — picks up Python changes imme
+ 
+ ## Gotchas
+ 
+-- `tox -e unit` skips the client build (hence "fast"); the env itself runs `pip install {toxinidir}/rocisa/` so it does **not** require a prior `invoke build-client` for rocisa to be importable. To run `pytest` directly outside tox, install rocisa once with `invoke rocisa`.
++- `tox -e unit` installs editable rocisa and TensileLite, builds the client, and configures the active installation binding before unit tests. To run `pytest` directly outside tox, use `invoke install` or perform the equivalent editable install and binding steps.
+ - `tox -e py3` (the full common-tests env) does invoke `build-client` itself inside its `commands` block — that's where the "long client build" happens. Override its CMake/client args via `TENSILELITE_CLIENT_ARGS`, and parallelism via `TENSILE_NUM_PYTEST_WORKERS` (default 4).
+ - `invoke install` is the Linux one-command source-development setup: it installs shared dev requirements, runs the editable rocisa workflow, builds the client, installs TensileLite editably, and then binds that installation with `python -m tensilelite_configure_client --client <absolute-executable>`. Use `--reset` to remove the current keyed binding.
+ - Two test trees exist: `tensilelite/Tests/` (YAML kernel tests, run via `tox`/`pytest`) vs `tests/` (C++ host-library gtest, gated by CMake `TENSILELITE_BUILD_TESTING=ON`).
+diff --git a/projects/hipblaslt/tensilelite/AGENTS_reference.md b/projects/hipblaslt/tensilelite/AGENTS_reference.md
+index 48ecf02469186d567cc310e72f9a8ea5fe371d38..c7623546e47f0c9c5f613ba3901356d1df25f675 100644
+--- a/projects/hipblaslt/tensilelite/AGENTS_reference.md
++++ b/projects/hipblaslt/tensilelite/AGENTS_reference.md
+@@ -8,7 +8,7 @@ Supplementary reference for `AGENTS.md` — load this when you need test command
+ # Full test suite (builds client + runs all common tests)
+ tox -e py3 -- tensilelite/Tests -m common
+ 
+-# Python unit tests only (skips the long client build; requires a prior build)
++# Python unit tests only (builds and configures the client in the tox environment)
+ tox -e unit -- tensilelite/Tests/unit
+ 
+ # Run a specific test category
+@@ -49,7 +49,7 @@ make -j8
+ 
+ ```bash
+ tox -e lint          # flake8 (pyflakes errors only, E/W ignored)
+-tox -e format        # black (line-length=100) on Common/, TensileCreateLibrary/, Utilities/Decorators/
++tox -e format        # black (line-length=100) on Common/, tensilelite_create_library/, Utilities/Decorators/
+ tox -e isort         # isort (black profile) on same directories
+ ```
+ 
+diff --git a/projects/hipblaslt/tensilelite/README.md b/projects/hipblaslt/tensilelite/README.md
+index 1a5683b62168eaa2fd8173d724767f364ac78ff7..ce5b737f3bcbc9a2933e1166d5bc1b4a6c884fd4 100644
+--- a/projects/hipblaslt/tensilelite/README.md
++++ b/projects/hipblaslt/tensilelite/README.md
+@@ -4,8 +4,8 @@
+ # TensileLite
+ 
+ TensileLite is hipBLASLt's Python generator, logic validator, and tuning
+-workflow. Released Python wheels are part of a matched ROCm SDK. The final
+-runtime contract has two installation models:
++workflow. Released Python wheels are part of a matched ROCm SDK. The intended
++final runtime contract has two installation models:
+ 
+ - **Python SDK packages:** the active `rocm-sdk-core.__version__` is the full
+   ROCm publication identity. Core tool trampolines from that Python
+@@ -22,6 +22,11 @@ The two models do not borrow paths from each other. `rocisa` is a
+ separately prepared Python dependency; TensileLite requires it to be importable
+ but does not prescribe its ABI or native-artifact layout.
+ 
++At present, the Python-SDK path and strict wheel/ROCm version comparison are
++implemented but deliberately gated off until TheRock forwards the required
++package identity and SDK payload. Production uses conventional-prefix discovery
++and bypasses the version comparison during that transition.
++
+ ## Supported interface
+ 
+ ```bash
+@@ -59,8 +64,9 @@ python -m pip install --index-url <rocm-wheel-index> \
+ python -m pip install --index-url <rocm-wheel-index> tensilelite
+ ```
+ 
+-Import fails deliberately when the wheel and ROCm release differ or when rocisa
+-cannot be imported. The client is resolved and validated only when a
++When the strict validation gate is enabled, import fails when the wheel and ROCm
++release differ or when rocisa cannot be imported. The client is resolved and
++validated only when a
+ benchmark/validation workflow requests its path. A configured client binding
+ always wins for a conventional-prefix installation. The Python SDK model
+ currently reports that the client is unavailable because `rocm-sdk-libraries`
+@@ -108,7 +114,8 @@ existing client executable:
+ python -m pip install -r requirements-dev-common.txt
+ invoke build-client --gpu-targets gfx942
+ 
+-python -m pip install --no-build-isolation --no-deps -e .
++TENSILELITE_ROCM_VERSION="$(<"${ROCM_PATH:-/opt/rocm}/.info/version")" \
++  python -m pip install --no-build-isolation --no-deps -e .
+ python -m tensilelite_configure_client \
+   --client "$PWD/build_tmp/tensilelite/client/tensilelite-client"
+ 
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/tensilelite.py b/projects/hipblaslt/tensilelite/tensilelite/tensilelite.py
+index 8c28efcb9879ab7dae862c0b499b46f4e57529b5..f2d7bdf9ae2f5b7b00c437386a232ee7bba3b377 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/tensilelite.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/tensilelite.py
+@@ -61,7 +61,7 @@ from tensilelite import LibraryLogic
+ 
+ ###############################################################################
+ # Execute Steps in Config
+-# called from Tensile() below
++# called from tensilelite() below
+ # calls
+ #   BenchmarkProblems.main() to run benchmark steps
+ #   LibraryLogic.main() to analyse final benchmark data and produce logic/yaml

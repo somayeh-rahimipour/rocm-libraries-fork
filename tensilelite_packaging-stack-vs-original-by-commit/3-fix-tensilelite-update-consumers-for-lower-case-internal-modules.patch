@@ -1,0 +1,243 @@
+diff --git a/projects/hipblaslt/.agent/docs/targets.json b/projects/hipblaslt/.agent/docs/targets.json
+index 2d7e0f8e0cbb6b5c5b1ececeb64ca86af67b9a3b..05aca3f0924f7ca97460f96c8f20f5f2e2c865c7 100644
+--- a/projects/hipblaslt/.agent/docs/targets.json
++++ b/projects/hipblaslt/.agent/docs/targets.json
+@@ -1,9 +1,9 @@
+ {
+ 	"targets": [
+-		"projects/hipblaslt/tensilelite/Tensile"
++		"projects/hipblaslt/tensilelite/tensilelite"
+ 	],
+ 	"exclude": [
+-		{"dir": "projects/hipblaslt/tensilelite/Tensile/Tests", "pattern": "*.yaml"},
++		{"dir": "projects/hipblaslt/tensilelite/tensilelite/Tests", "pattern": "*.yaml"},
+ 		{"dir": "projects/hipblaslt/docs", "pattern": "*"}
+ 	]
+ }
+diff --git a/projects/hipblaslt/CONTRIBUTING.md b/projects/hipblaslt/CONTRIBUTING.md
+index ba03523dff3869df122bf01c18bc83dbb60ebc63..12d685b480e0426630d1eff50eea5a7337f3edbf 100644
+--- a/projects/hipblaslt/CONTRIBUTING.md
++++ b/projects/hipblaslt/CONTRIBUTING.md
+@@ -133,9 +133,9 @@ If you run from elsewhere, the test may not find the data file. For more run opt
+ 
+ ## TensileLite Python tests (codegen / characterization)
+ 
+-The sections above cover the **client** tests (`hipblaslt-test`, gtest, YAML data). The in-repo **TensileLite generator** has its own Python test suite under `tensilelite/Tensile/Tests/unit/`, including **characterization tests** that pin current behavior with [syrupy](https://github.com/syrupy-project/syrupy) `.ambr` golden files.
++The sections above cover the **client** tests (`hipblaslt-test`, gtest, YAML data). The in-repo **TensileLite generator** has its own Python test suite under `tensilelite/tensilelite/Tests/unit/`, including **characterization tests** that pin current behavior with [syrupy](https://github.com/syrupy-project/syrupy) `.ambr` golden files.
+ 
+-If your change makes a characterization test fail, do **not** run a blanket `pytest --snapshot-update` (it rewrites every golden and destroys the safety net). Update only the affected node and review the diff. Full policy and the decision tree: [`tensilelite/Tensile/Tests/unit/characterization/README.md`](tensilelite/Tensile/Tests/unit/characterization/README.md).
++If your change makes a characterization test fail, do **not** run a blanket `pytest --snapshot-update` (it rewrites every golden and destroys the safety net). Update only the affected node and review the diff. Full policy and the decision tree: [`tensilelite/tensilelite/Tests/unit/characterization/README.md`](tensilelite/tensilelite/Tests/unit/characterization/README.md).
+ 
+ ---
+ 
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/_codegen/char_paths.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/_codegen/char_paths.py
+index e50533d29e0dd6adee8089c9fcfdaf23ad9154af..d32662ad1dd4b31a395b52c1863757c262234135 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/_codegen/char_paths.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/_codegen/char_paths.py
+@@ -4,14 +4,14 @@
+ ################################################################################
+ """Shared path resolution for characterization suites.
+ 
+-Several suites address shipped source/data files as ``Tensile/...`` paths
++Several suites address shipped source/data files as ``tensilelite/...`` paths
+ relative to the process CWD. The tox ``unit``/``coverage-unit`` environments run
+ from the package root, so those resolve; the installed-artifact test tree
+ (``share/hipblaslt/tensilelite``, run by TheRock) is driven from the CI
+ workspace root, where the same relative paths raise ``FileNotFoundError``.
+ 
+ Resolve such paths CWD-first (preserving current behavior) and fall back to a
+-location anchored at the installed ``Tensile`` package, so the suites work
++location anchored at the installed ``tensilelite`` package, so the suites work
+ regardless of the process CWD.
+ 
+ This is *not* a test module (no ``test_`` prefix, not collected).
+@@ -21,14 +21,14 @@ from pathlib import Path
+ 
+ 
+ def tensile_tree_root() -> Path:
+-    """Return the directory that contains the installed ``Tensile`` package."""
++    """Return the directory that contains the installed ``tensilelite`` package."""
+     import tensilelite
+ 
+     return Path(tensilelite.__file__).resolve().parent.parent
+ 
+ 
+ def resolve_tensile_path(relpath) -> Path:
+-    """Resolve a ``Tensile/...``-relative path, CWD-first then package-anchored.
++    """Resolve a ``tensilelite/...``-relative path, CWD-first then package-anchored.
+ 
+     Absolute paths and paths that exist relative to the CWD are returned as-is.
+     Otherwise the path is re-anchored at :func:`tensile_tree_root`; if that
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
+index 697ebdf47317fe75a2f5a75068df8c161a1326ab..ee37a62acf6aa713a48d2b08c2b74056ba8c48b9 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
+@@ -109,19 +110,19 @@
+     "tensilelite/benchmark_cluster.py": 99.51,
+     "tensilelite/benchmark_cluster_scripts.py": 100.0,
+     "tensilelite/benchmark_library_client.py": 54.41,
+-    "tensilelite/tensilelite_create_library/ParseArguments.py": 100.0,
+-    "tensilelite/tensilelite_create_library/Run.py": 88.53,
++    "tensilelite/tensilelite_create_library/parse_arguments.py": 100.0,
++    "tensilelite/tensilelite_create_library/run.py": 88.53,
+     "tensilelite/tensilelite_create_library/__init__.py": 100.0,
+     "tensilelite/tensilelite_create_library/__main__.py": 100.0,
+     "tensilelite/lib_logic_to_yaml.py": 93.51,
+-    "tensilelite/tensilelite_logic/HandleCustomKernel.py": 100.0,
+-    "tensilelite/tensilelite_logic/KnownBugs.py": 100.0,
+-    "tensilelite/tensilelite_logic/ParseArguments.py": 100.0,
+-    "tensilelite/tensilelite_logic/Run.py": 89.9,
+-    "tensilelite/tensilelite_logic/ValidChipId.py": 100.0,
+-    "tensilelite/tensilelite_logic/ValidMatrixInstruction.py": 100.0,
+-    "tensilelite/tensilelite_logic/ValidWorkGroup.py": 100.0,
+-    "tensilelite/tensilelite_logic/ValidWorkGroupMappingXCC.py": 100.0,
++    "tensilelite/tensilelite_logic/handle_custom_kernel.py": 100.0,
++    "tensilelite/tensilelite_logic/known_bugs.py": 100.0,
++    "tensilelite/tensilelite_logic/parse_arguments.py": 100.0,
++    "tensilelite/tensilelite_logic/run.py": 89.9,
++    "tensilelite/tensilelite_logic/valid_chip_id.py": 100.0,
++    "tensilelite/tensilelite_logic/valid_matrix_instruction.py": 100.0,
++    "tensilelite/tensilelite_logic/valid_work_group.py": 100.0,
++    "tensilelite/tensilelite_logic/valid_work_group_mapping_xcc.py": 100.0,
+     "tensilelite/tensilelite_logic/__init__.py": 100.0,
+     "tensilelite/merge_library.py": 97.91,
+     "tensilelite/retune_library.py": 96.45,
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_gfx1250_asic_revision.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_gfx1250_asic_revision.py
+index ba0004e25d4a2a37e3f5f3a7727ac6d85f1b1af5..c3e4d750db0b1c6fc47abaa3106c1bb0c1906ae7 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_gfx1250_asic_revision.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_gfx1250_asic_revision.py
+@@ -879,7 +879,7 @@ def _stub_tensile_pipeline(monkeypatch, captured):
+     pipeline is handed. Mirrors the stub set in test_tensile_backend_config.py."""
+     import types
+ 
+-    from Tensile import Tensile as TensileModule
++    from tensilelite import tensilelite as TensileModule
+ 
+     monkeypatch.setattr(
+         TensileModule, "validateToolchain", lambda *a: ("cxx", "cc", "bundler")
+@@ -926,7 +926,7 @@ def test_tensile_entry_point_applies_the_v0_overrides(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path)
+ 
+-    TensileModule.Tensile(
++    TensileModule.tensilelite(
+         [config, str(tmp_path / "out"), "--gpu-targets", GFX1250V0]
+     )
+ 
+@@ -944,7 +944,7 @@ def test_tensile_entry_point_leaves_v1_capabilities_untouched(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path)
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out"), "--gpu-targets", GFX1250])
++    TensileModule.tensilelite([config, str(tmp_path / "out"), "--gpu-targets", GFX1250])
+ 
+     info = captured["isaInfoMap"][ISA_GFX1250]
+     assert CAP_MULTICAST not in info.archCaps
+@@ -966,7 +966,7 @@ def test_config_architecture_selects_the_asic_revision(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path, Architecture=GFX1250V0, ISA=[[12, 5, 0]])
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out")])
++    TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+     info = captured["isaInfoMap"][ISA_GFX1250]
+     assert info.archCaps[CAP_MULTICAST] is False
+@@ -983,7 +983,7 @@ def test_config_architecture_of_the_shipping_asic_revision_adds_nothing(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path, Architecture=GFX1250, ISA=[[12, 5, 0]])
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out")])
++    TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+     info = captured["isaInfoMap"][ISA_GFX1250]
+     assert CAP_MULTICAST not in info.archCaps
+@@ -999,7 +999,7 @@ def test_gpu_targets_overrides_the_config_architecture(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path, Architecture=GFX1250V0, ISA=[[12, 5, 0]])
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out"), "--gpu-targets", GFX1250])
++    TensileModule.tensilelite([config, str(tmp_path / "out"), "--gpu-targets", GFX1250])
+ 
+     info = captured["isaInfoMap"][ISA_GFX1250]
+     assert CAP_MULTICAST not in info.archCaps
+@@ -1016,7 +1016,7 @@ def test_config_architecture_for_an_isa_not_being_built_is_ignored(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path, Architecture="gfx942", ISA=[[12, 5, 0]])
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out")])
++    TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+     assert captured["archNames"] == []
+     assert CAP_MULTICAST not in captured["isaInfoMap"][ISA_GFX1250].archCaps
+@@ -1031,7 +1031,7 @@ def test_config_architecture_naming_an_asic_revision_of_another_isa_is_rejected(
+     config = _write_min_config(tmp_path, Architecture=GFX1250V0, ISA=[[9, 4, 2]])
+ 
+     with pytest.raises(ValueError) as excinfo:
+-        TensileModule.Tensile([config, str(tmp_path / "out")])
++        TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+     assert GFX1250V0 in str(excinfo.value)
+ 
+@@ -1047,7 +1047,7 @@ def test_unrecognized_config_architecture_is_rejected(
+     config = _write_min_config(tmp_path, Architecture=arch, ISA=[[12, 5, 0]])
+ 
+     with pytest.raises(ValueError) as excinfo:
+-        TensileModule.Tensile([config, str(tmp_path / "out")])
++        TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+     assert arch in str(excinfo.value)
+ 
+@@ -1062,7 +1062,7 @@ def test_mixed_asic_revisions_in_the_config_architecture_are_rejected(
+     )
+ 
+     with pytest.raises(ValueError):
+-        TensileModule.Tensile([config, str(tmp_path / "out")])
++        TensileModule.tensilelite([config, str(tmp_path / "out")])
+ 
+ 
+ def test_tensile_entry_point_records_the_requested_names(
+@@ -1075,7 +1075,7 @@ def test_tensile_entry_point_records_the_requested_names(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path)
+ 
+-    TensileModule.Tensile(
++    TensileModule.tensilelite(
+         [config, str(tmp_path / "out"), "--gpu-targets", GFX1250V0]
+     )
+ 
+@@ -1097,7 +1097,7 @@ def test_unknown_gpu_target_is_rejected(
+     config = _write_min_config(tmp_path)
+ 
+     with pytest.raises(ValueError, match=target):
+-        TensileModule.Tensile([config, str(tmp_path / "out"), "--gpu-targets", target])
++        TensileModule.tensilelite([config, str(tmp_path / "out"), "--gpu-targets", target])
+ 
+ 
+ @pytest.mark.parametrize(
+@@ -1122,7 +1122,7 @@ def test_qualified_gpu_targets_stay_accepted(
+     TensileModule = _stub_tensile_pipeline(monkeypatch, captured)
+     config = _write_min_config(tmp_path)
+ 
+-    TensileModule.Tensile([config, str(tmp_path / "out"), "--gpu-targets", target])
++    TensileModule.tensilelite([config, str(tmp_path / "out"), "--gpu-targets", target])
+ 
+     assert captured["archNames"] == [target]
+ 
+@@ -1142,7 +1142,7 @@ def _run_createlibrary(monkeypatch, tmp_path, arch, logicArchName=None):
+     """
+     from unittest.mock import MagicMock
+ 
+-    import Tensile.TensileCreateLibrary.Run as RunModule
++    import tensilelite.tensilelite_create_library.run as RunModule
+ 
+     logic_dir = tmp_path / "logic"
+     logic_dir.mkdir()
+@@ -1382,7 +1382,7 @@ def test_client_writer_receives_the_requested_names(monkeypatch, tmp_path):
+     and the re-spawn."""
+     import types
+ 
+-    from Tensile import Tensile as TensileModule
++    from tensilelite import tensilelite as TensileModule
+ 
+     captured = {}
+     monkeypatch.setattr(

@@ -1,0 +1,16 @@
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurface/test_pchaos_Tensile_L25_char.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurface/test_pchaos_Tensile_L25_char.py
+index ade73cc5e3bf31a87e305f5e90fe76f6c2127dc0..2911c8aa42e3b1473e87afe313bb871375b4d68c 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurface/test_pchaos_Tensile_L25_char.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurface/test_pchaos_Tensile_L25_char.py
+@@ -38,6 +38,11 @@ def test_module_guard_false_import_succeeds():
+     M = importlib.import_module("tensilelite.tensilelite")
+     # The module's __name__ attribute is the dotted import name, not "__main__".
+     assert M.__name__ == "tensilelite.tensilelite"
++
++
++def test_module_guard_false_name_is_not_main():
++    """The loaded module's __name__ is NOT '__main__', confirming the FALSE branch."""
++    M = importlib.import_module("tensilelite.tensilelite")
+     assert M.__name__ != "__main__"
+ 
+ 

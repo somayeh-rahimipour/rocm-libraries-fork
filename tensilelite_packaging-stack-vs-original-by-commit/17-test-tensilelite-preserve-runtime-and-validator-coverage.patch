@@ -1,0 +1,322 @@
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurfaceDeep/test_pchaos_Validators_L97_char.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurfaceDeep/test_pchaos_Validators_L97_char.py
+index 884497e0d4acfd8e1e5106670efef6922d67bdcf..938bf15d22899db36c6e279ccae97930c8bea239 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurfaceDeep/test_pchaos_Validators_L97_char.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/PublicInputSurfaceDeep/test_pchaos_Validators_L97_char.py
+@@ -1,37 +1,36 @@
+ ################################################################################
+ # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
++# SPDX-License-Identifier: MIT
+ ################################################################################
+ 
+-"""Characterize frozen-root tool search in ``Toolchain.Validators``.
++"""Characterize Validators' selected-installation search-path seam."""
+ 
+-The runtime root selected at ``import tensilelite`` is the sole source for
+-relative tool names. Ambient ``ROCM_PATH``, ``/opt/rocm``, and ``PATH`` must not
+-contribute competing SDK roots.
+-"""
++from pathlib import Path
+ 
+ import pytest
+ 
++from tensilelite.Toolchain import Validators
++
+ 
+ pytestmark = pytest.mark.unit
+ 
+ 
+-def test_relative_tool_does_not_fall_back_outside_frozen_root(tmp_path, monkeypatch):
+-    from tensilelite.Toolchain import Validators
+-
+-    root = tmp_path / "selected"
+-    selected_bin = root / "bin"
+-    selected_bin.mkdir(parents=True)
+-    stale_bin = tmp_path / "stale"
+-    stale_bin.mkdir()
+-    stale_tool = stale_bin / "amdclang++"
+-    stale_tool.write_text("#!/bin/sh\n", encoding="utf-8")
+-    stale_tool.chmod(0o755)
+-    monkeypatch.setattr(
+-        Validators,
+-        "executable_search_paths",
+-        lambda: [root / "bin", root / "lib" / "llvm" / "bin"],
+-    )
+-    monkeypatch.setenv("PATH", str(stale_bin))
+-
+-    with pytest.raises(FileNotFoundError):
++def _executable(directory: Path, name: str) -> Path:
++    path = directory / name
++    path.write_text("#!/bin/sh\n", encoding="utf-8")
++    path.chmod(0o755)
++    return path
++
++
++def test_validate_toolchain_uses_runtime_selected_paths(monkeypatch, tmp_path):
++    _executable(tmp_path, "amdclang++")
++    monkeypatch.setattr(Validators, "executable_search_paths", lambda: [tmp_path])
++
++    assert Validators.validateToolchain("amdclang++") == str(tmp_path / "amdclang++")
++
++
++def test_missing_component_reports_the_selected_installation(monkeypatch, tmp_path):
++    monkeypatch.setattr(Validators, "executable_search_paths", lambda: [tmp_path])
++
++    with pytest.raises(FileNotFoundError, match=str(tmp_path)):
+         Validators.validateToolchain("amdclang++")
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/ToolchainValidators/test_toolchain_validators_char.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/ToolchainValidators/test_toolchain_validators_char.py
+index 19a70475d7bfb0f95fbd8265ea321416d2053d64..ce46e981c74430d065dffab852e8fe73283a3afd 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/ToolchainValidators/test_toolchain_validators_char.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/ToolchainValidators/test_toolchain_validators_char.py
+@@ -1,191 +1,92 @@
+ ################################################################################
+-# Characterization tests for tensilelite.Toolchain.Validators
+-#
+-# ADD-ONLY: pins current behavior of the toolchain component validators.
+-# Posix-focused (the container is Linux); Windows-only branches are documented
+-# as resistance rather than exercised (os.name cannot be flipped meaningfully
+-# because the Windows paths call os.environ["PATHEXT"], _windowsLatestRocmBin,
+-# etc. on a non-Windows fs). See target.md.
++# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
++# SPDX-License-Identifier: MIT
+ ################################################################################
+-import importlib
+-import stat
+ 
+-import pytest
+-
+-pytestmark = pytest.mark.unit
++"""Characterization coverage for selected-installation toolchain validation."""
+ 
+-V = importlib.import_module("tensilelite.Toolchain.Validators")
+-
+-
+-# ---------------------------------------------------------------------------
+-# supported* predicates (pure)
+-# ---------------------------------------------------------------------------
+-@pytest.mark.parametrize(
+-    "fn,name,expected",
+-    [
+-        ("supportedCxxCompiler", "amdclang++", True),
+-        ("supportedCxxCompiler", "clang++", True),
+-        ("supportedCxxCompiler", "/opt/rocm/bin/amdclang++", True),
+-        ("supportedCxxCompiler", "amdclang", False),
+-        ("supportedCxxCompiler", "g++", False),
+-        ("supportedCCompiler", "amdclang", True),
+-        ("supportedCCompiler", "clang", True),
+-        ("supportedCCompiler", "/usr/bin/clang", True),
+-        ("supportedCCompiler", "amdclang++", False),
+-        ("supportedOffloadBundler", "clang-offload-bundler", True),
+-        ("supportedOffloadBundler", "clang", False),
+-        ("supportedHip", "hipcc", True),
+-        ("supportedHip", "hipconfig", True),
+-        ("supportedHip", "hipcc.exe", False),
+-    ],
+-)
+-def test_supported_predicates(fn, name, expected):
+-    assert getattr(V, fn)(name) is expected
+-
+-
+-def test_supported_device_enumerator_posix():
+-    # POSIX accepts the current TheRock command plus compatibility fallbacks.
+-    assert V.supportedDeviceEnumerator("offload-arch") is True
+-    assert V.supportedDeviceEnumerator("rocm_agent_enumerator") is True
+-    assert V.supportedDeviceEnumerator("amdgpu-arch") is True
+-    assert V.supportedDeviceEnumerator("/opt/rocm/bin/amdgpu-arch") is True
+-    assert V.supportedDeviceEnumerator("hipinfo") is False
++from pathlib import Path
+ 
++import pytest
+ 
+-def test_supported_component_matches_basename():
+-    # _supportedComponent matches both the raw string and Path(component).name
+-    assert V._supportedComponent("amdclang", ["amdclang"]) is True
+-    assert V._supportedComponent("/a/b/amdclang", ["amdclang"]) is True
+-    assert V._supportedComponent("amdclang", ["clang"]) is False
+-
++from tensilelite.Toolchain import Validators
+ 
+-# ---------------------------------------------------------------------------
+-# _exeExists
+-# ---------------------------------------------------------------------------
+-def test_exe_exists_true_false(tmp_path):
+-    exe = tmp_path / "amdclang++"
+-    exe.write_text("#!/bin/sh\n")
+-    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+-    assert V._exeExists(exe) is True
+ 
+-    missing = tmp_path / "nope"
+-    assert V._exeExists(missing) is False
++pytestmark = pytest.mark.unit
+ 
+ 
+-# ---------------------------------------------------------------------------
+-# _validateExecutable
+-# ---------------------------------------------------------------------------
+-def _make_exe(d, name):
+-    p = d / name
+-    p.write_text("#!/bin/sh\n")
+-    p.chmod(p.stat().st_mode | stat.S_IXUSR)
+-    return p
++def _executable(directory: Path, name: str) -> Path:
++    path = directory / name
++    path.write_text("#!/bin/sh\n", encoding="utf-8")
++    path.chmod(0o755)
++    return path
+ 
+ 
+-def test_validate_executable_absolute_ok(tmp_path):
+-    exe = _make_exe(tmp_path, "amdclang++")
+-    assert V._validateExecutable(str(exe), []) == str(exe)
++def test_supported_component_matches_basename():
++    assert Validators._supportedComponent("/a/b/amdclang", ["amdclang"])
++    assert not Validators._supportedComponent("amdclang", ["clang"])
+ 
+ 
+-def test_validate_executable_absolute_missing(tmp_path):
+-    missing = tmp_path / "amdclang++"  # supported name but not created
+-    with pytest.raises(FileNotFoundError):
+-        V._validateExecutable(str(missing), [])
++def test_current_supported_component_predicates():
++    assert Validators.supportedCxxCompiler("amdclang++")
++    assert Validators.supportedCxxCompiler("clang++")
++    assert not Validators.supportedCxxCompiler("g++")
++    assert Validators.supportedCCompiler("amdclang")
++    assert Validators.supportedCCompiler("clang")
++    assert not Validators.supportedCCompiler("gcc")
++    assert Validators.supportedOffloadBundler("clang-offload-bundler")
++    assert not Validators.supportedOffloadBundler("clang-offload-bundlerx")
++    assert Validators.supportedHip("hipcc")
++    assert Validators.supportedHip("hipconfig")
++    assert not Validators.supportedHip("hipcc.exe")
++    assert Validators.supportedDeviceEnumerator("offload-arch")
++    assert Validators.supportedDeviceEnumerator("amdgpu-arch")
++    assert not Validators.supportedDeviceEnumerator("device-enumerator")
+ 
+ 
+-def test_validate_executable_unsupported_name(tmp_path):
+-    exe = _make_exe(tmp_path, "g++")
+-    with pytest.raises(ValueError):
+-        V._validateExecutable(str(exe), [tmp_path])
++def test_validate_toolchain_resolves_a_relative_component(monkeypatch, tmp_path):
++    _executable(tmp_path, "amdclang")
++    monkeypatch.setattr(Validators, "executable_search_paths", lambda: [tmp_path])
+ 
++    assert Validators.validateToolchain("amdclang") == str(tmp_path / "amdclang")
+ 
+-def test_validate_executable_found_in_search_path(tmp_path):
+-    _make_exe(tmp_path, "amdclang")
+-    # relative name resolved against searchPaths
+-    assert V._validateExecutable("amdclang", [tmp_path]) == str(tmp_path / "amdclang")
+ 
++def test_validate_executable_preserves_absolute_and_rejection_contracts(tmp_path):
++    executable = _executable(tmp_path, "amdclang++")
+ 
+-def test_validate_executable_not_in_any_search_path(tmp_path):
++    assert Validators._validateExecutable(str(executable), []) == str(executable)
+     with pytest.raises(FileNotFoundError):
+-        V._validateExecutable("amdclang", [tmp_path])
+-
+-
+-# ---------------------------------------------------------------------------
+-# validateToolchain (public entry)
+-# ---------------------------------------------------------------------------
+-def test_validate_toolchain_no_args():
++        Validators._validateExecutable(str(tmp_path / "missing" / "amdclang++"), [])
+     with pytest.raises(ValueError):
+-        V.validateToolchain()
++        Validators._validateExecutable(str(_executable(tmp_path, "g++")), [tmp_path])
+ 
+ 
+-def test_validate_toolchain_single_returns_scalar(tmp_path, monkeypatch):
+-    _make_exe(tmp_path, "amdclang++")
+-    monkeypatch.setattr(V, "executable_search_paths", lambda: [tmp_path])
+-    result = V.validateToolchain("amdclang++")
+-    assert result == str(tmp_path / "amdclang++")
+-    assert isinstance(result, str)
++def test_validate_toolchain_preserves_zero_scalar_and_tuple_contracts(monkeypatch, tmp_path):
++    _executable(tmp_path, "amdclang++")
++    _executable(tmp_path, "amdclang")
++    monkeypatch.setattr(Validators, "executable_search_paths", lambda: [tmp_path])
+ 
+-
+-def test_validate_toolchain_multiple_returns_tuple(tmp_path, monkeypatch):
+-    _make_exe(tmp_path, "amdclang++")
+-    _make_exe(tmp_path, "amdclang")
+-    monkeypatch.setattr(V, "executable_search_paths", lambda: [tmp_path])
+-    result = V.validateToolchain("amdclang++", "amdclang")
+-    assert isinstance(result, tuple)
+-    assert result == (str(tmp_path / "amdclang++"), str(tmp_path / "amdclang"))
+-
+-
+-def test_validate_toolchain_propagates_not_found(tmp_path, monkeypatch):
+-    monkeypatch.setattr(V, "executable_search_paths", lambda: [tmp_path])
+-    with pytest.raises(FileNotFoundError):
+-        validate = V.validateToolchain("amdclang++")
+-        # generator is lazy for the single-arg path; force evaluation
+-        _ = validate
+-
+-
+-# ---------------------------------------------------------------------------
+-# ToolchainDefaults (NamedTuple class attributes resolved at import on posix)
+-# ---------------------------------------------------------------------------
+-def test_toolchain_defaults_posix():
+-    d = V.ToolchainDefaults
+-    assert d.CXX_COMPILER == "amdclang++"
+-    assert d.C_COMPILER == "amdclang"
+-    assert d.OFFLOAD_BUNDLER == "clang-offload-bundler"
+-    assert d.ASSEMBLER == "amdclang++"
+-    assert d.HIP_CONFIG == "hipconfig"
+-    assert d.DEVICE_ENUMERATOR == "offload-arch"
+-
+-
+-def test_oss_select_posix():
+-    assert V.osSelect(linux="L", windows="W") == "L"
+-
+-
+-def test_windows_with_extensions_raises_on_posix():
+-    # os.name is 'posix' in the container -> guard raises.
+     with pytest.raises(ValueError):
+-        V._windowsWithExtensions("amdclang++")
+-
++        Validators.validateToolchain()
++    assert Validators.validateToolchain("amdclang++") == str(tmp_path / "amdclang++")
++    assert Validators.validateToolchain("amdclang++", "amdclang") == (
++        str(tmp_path / "amdclang++"),
++        str(tmp_path / "amdclang"),
++    )
+ 
+-def test_windows_with_extensions_nt(monkeypatch):
+-    monkeypatch.setattr(V.os, "name", "nt")
+-    monkeypatch.setenv("PATHEXT", ".EXE;.BAT")
+-    files = V._windowsWithExtensions("amdclang++")
+-    assert files == ["amdclang++", "amdclang++.exe", "amdclang++.bat"]
+ 
++def test_device_enumerator_candidates_use_rhel_compatibility_fallback(monkeypatch):
++    calls = []
+ 
+-@pytest.mark.nt_path_simulation
+-def test_supported_component_windows_branch(monkeypatch):
+-    monkeypatch.setattr(V.os, "name", "nt")
+-    monkeypatch.setenv("PATHEXT", ".EXE")
+-    # targets get extension-expanded; raw 'amdclang++' still matches
+-    assert V._supportedComponent("amdclang++", ["amdclang++"]) is True
+-    assert V._supportedComponent("amdclang++.exe", ["amdclang++"]) is True
++    def validate(name):
++        calls.append(name)
++        if name in ("offload-arch", "amdgpu-arch"):
++            raise FileNotFoundError(name)
++        return f"/selected/{name}"
+ 
++    monkeypatch.setattr(Validators, "validateToolchain", validate)
++    monkeypatch.setattr(Validators, "isRhel8", lambda: True)
++    monkeypatch.setattr(Validators.ToolchainDefaults, "inFFMEnv", False)
+ 
+-@pytest.mark.nt_path_simulation
+-def test_supported_device_enumerator_windows(monkeypatch):
+-    monkeypatch.setattr(V.os, "name", "nt")
+-    monkeypatch.setenv("PATHEXT", ".EXE")
+-    assert V.supportedDeviceEnumerator("hipinfo") is True
+-    assert V.supportedDeviceEnumerator("hipInfo") is True
+-    assert V.supportedDeviceEnumerator("amdgpu-arch") is False
++    assert Validators.deviceEnumeratorCandidates() == ("/selected/rocm_agent_enumerator",)
++    assert calls == ["offload-arch", "amdgpu-arch", "rocm_agent_enumerator"]

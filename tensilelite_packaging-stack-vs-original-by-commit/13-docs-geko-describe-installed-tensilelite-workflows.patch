@@ -1,0 +1,60 @@
+diff --git a/projects/hipblaslt/utilities/geko/README.md b/projects/hipblaslt/utilities/geko/README.md
+index bc80b7f1c8ec1553c39c9d4d069770a8e2006580..803c0005a02fe4e07a66ba885857c64ddee548a3 100644
+--- a/projects/hipblaslt/utilities/geko/README.md
++++ b/projects/hipblaslt/utilities/geko/README.md
+@@ -590,17 +590,26 @@ my_optimization/
+ HIPBLASLT_PATH="/path/to/rocm-libraries/projects/hipblaslt"
+ LIBRARY_DIR="${HIPBLASLT_PATH}/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/Equality/"
+ 
+-tensilelite mergelibrary \
+-  --no_eff --force_merge True \
+-  "${LIBRARY_DIR}" my_optimization/final_libs "${LIBRARY_DIR}"
++python - <<PY
++from tensilelite.merge_library import avoidRegressions
++
++avoidRegressions(
++    "${LIBRARY_DIR}",
++    "my_optimization/final_libs",
++    "${LIBRARY_DIR}",
++    forceMerge=True,
++    noEff=True,
++)
++PY
+ 
+ cd "${HIPBLASLT_PATH}"
+ invoke build --install-deps --clients --architecture gfx950 --skip-rocroller
+ ```
+ 
+-`tensilelite mergelibrary` arguments: `--no_eff` skips efficiency calculations;
+-`--force_merge True` forces merge on conflicts; the three positional arguments
+-are original dir, new libs dir, output dir (same as original to update in place).
++`avoidRegressions` skips efficiency calculations with `noEff=True` and forces
++merge on conflicts with `forceMerge=True`; its three path arguments are the
++original directory, new-libraries directory, and output directory (the original
++directory above, to update in place).
+ 
+ **Verify:**
+ ```bash
+@@ -674,7 +683,8 @@ my_search/
+ 
+ #### Integrate
+ 
+-Same steps as GA Optimization — run `tensilelite mergelibrary` then rebuild hipBLASLt with the contents of `my_search/final_libs`.
++Same steps as GA Optimization — call `tensilelite.merge_library.avoidRegressions`
++then rebuild hipBLASLt with the contents of `my_search/final_libs`.
+ 
+ ---
+ 
+diff --git a/projects/hipblaslt/utilities/geko/geko/config_generator/README.md b/projects/hipblaslt/utilities/geko/geko/config_generator/README.md
+index c936aee6d6a3d06c6e3f4ea5c3069f6fd8449e9c..34d2e9214519aed68ddc954280661b1ccbc673d4 100644
+--- a/projects/hipblaslt/utilities/geko/geko/config_generator/README.md
++++ b/projects/hipblaslt/utilities/geko/geko/config_generator/README.md
+@@ -20,7 +20,7 @@ python3 scripts/config_generator.py [--hipblaslt PATH] [--config PATH] [--output
+ - **`--verbose` / `-v`:** `0` = WARNING, `1` = INFO (default `1`).
+ - **`--no-shell-scripts`:** emit YAML and config log only (skip per-entity `.sh` and `run_*_all.sh`).
+ 
+-TensileLite is consumed through its installed Python package. When shell scripts are enabled (default), the driver may build and stage the TensileLite client via `geko.utils.build_tensilelite_client` (optional YAML key `BUILD_DIR` overrides the build directory). YAML-only runs (`write_shell_scripts=False`) skip the client build.
++TensileLite is consumed through its installed Python package. When shell scripts are enabled (default), the driver may build and bind the TensileLite client via `geko.utils.build_tensilelite_client` (optional YAML key `BUILD_DIR` overrides the build directory). YAML-only runs (`write_shell_scripts=False`) skip the client build.
+ 
+ ### Python API
+ 

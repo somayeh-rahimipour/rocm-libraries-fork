@@ -1,0 +1,186 @@
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/README.md b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/README.md
+index 3e4c34ca545042d01eb555504b4ede52cd8dbb22..12aef066efd2d5a6e62d68d1d27c5f217a4735e1 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/README.md
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/README.md
+@@ -4,16 +4,14 @@ This directory is collected recursively by source-tree CI and excluded as one
+ unit from the installed test artifact. The audit for the installed-wheel split
+ classified these checkout dependencies here:
+ 
+-- release inputs and wheel construction: `test_release_metadata.py`,
+-  `test_release_wheel_contents.py`, and `test_unbound_release_wheel.py`;
+-- CMake presets/options and developer Invoke workflows:
+-  `test_cmake_device_invariants.py` and `test_install_task.py`;
++- release inputs and wheel construction: `test_release_metadata.py`;
++- developer Invoke workflows: `test_install_task.py`;
+ - checkout-only developer scripts: `test_analyze_timing.py` and
+   `test_precommit_affected_tests.py`;
+ - source/AST and cross-component inspection: `test_EnableESM2TrackValuVsrc.py`,
+   `test_PlaceholderMerge.py`, `test_StinkyTofuESM2_sparse_guard.py`, and
+   `test_specs_amdsmi.py`.
+ 
+-Production-behavior tests remain in the parent unit directory. Tests that had
+-read adjacent production sources (`KnownBugs`, `ValidChipId`, and custom-kernel
+-resource coverage) now resolve the installed package API or resources instead.
++Production-behavior tests remain in the parent unit directory. Their
++installed-artifact adaptations land with the corresponding artifact behavior
++changes.
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_install_task.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_install_task.py
+index 2787b2299fd7f92b3be368dc14c9d432deea6e82..c9eb88e9c03fc4103ebb7950e368e1a96f7dacd9 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_install_task.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_install_task.py
+@@ -2,7 +2,10 @@
+ # SPDX-License-Identifier: MIT
+ 
+ from pathlib import Path
++import shlex
+ import subprocess
++import sys
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -29,7 +32,8 @@ def test_invoke_install_is_a_discoverable_developer_workflow():
+ 
+ 
+ def test_install_binds_the_actual_cmake_client_output(tmp_path):
+-    expected = tmp_path / "build/tensilelite/client/tensilelite-client"
++    executable = "tensilelite-client.exe" if sys.platform == "win32" else "tensilelite-client"
++    expected = tmp_path / "build/tensilelite/client" / executable
+     assert tasks._built_client_path(tmp_path / "build") == expected
+ 
+ 
+@@ -44,3 +48,97 @@ def test_install_derives_build_version_from_selected_rocm_root(tmp_path):
+ def test_install_rejects_rocm_root_without_version_metadata(tmp_path):
+     with pytest.raises(tasks.Exit, match="no readable version metadata"):
+         tasks._rocm_base_version(tmp_path)
++
++
++@pytest.mark.skipif(sys.platform != "linux", reason="invoke install is Linux-only")
++def test_install_uses_one_selected_rocm_root_and_binds_the_built_client(
++    tmp_path, monkeypatch
++):
++    rocm_root = (tmp_path / "rocm").resolve()
++    rocm_root.mkdir()
++    (rocm_root / ".info").mkdir()
++    (rocm_root / ".info" / "version").write_text("7.2.4\n", encoding="utf-8")
++    build_dir = tmp_path / "build"
++    client = tasks._built_client_path(build_dir)
++    client.parent.mkdir(parents=True)
++    client.write_text("client", encoding="utf-8")
++    client.chmod(0o755)
++
++    calls = []
++
++    def record_rocisa(context, **kwargs):
++        calls.append(("rocisa", kwargs))
++
++    def record_build_client(context, **kwargs):
++        calls.append(("build-client", kwargs))
++
++    class Context:
++        def run(self, command, **kwargs):
++            calls.append(("run", command, kwargs))
++
++    monkeypatch.setenv("ROCM_PATH", str(rocm_root))
++    monkeypatch.setattr(tasks, "rocisa", SimpleNamespace(body=record_rocisa))
++    monkeypatch.setattr(
++        tasks, "build_client", SimpleNamespace(body=record_build_client)
++    )
++
++    tasks.install.body(Context(), build_dir=str(build_dir))
++
++    requirements_command = shlex.split(calls[0][1])
++    assert requirements_command == [
++        str(Path(sys.executable).absolute()),
++        "-m",
++        "pip",
++        "install",
++        "-r",
++        str(_SOURCE_ROOT / "requirements-dev-common.txt"),
++    ]
++    assert calls[0][2] == {}
++    assert calls[1] == ("rocisa", {"rocm_path": str(rocm_root)})
++    assert calls[2][0] == "build-client"
++    assert calls[2][1]["rocm_path"] == str(rocm_root)
++    editable_command = shlex.split(calls[3][1])
++    assert editable_command[-4:] == [
++        "--no-build-isolation",
++        "--no-deps",
++        "--editable",
++        str(_SOURCE_ROOT),
++    ]
++    assert calls[3][2]["env"]["ROCM_PATH"] == str(rocm_root)
++    assert calls[3][2]["env"]["TENSILELITE_ROCM_VERSION"] == "7.2.4"
++    assert shlex.split(calls[4][1]) == [
++        str(Path(sys.executable).absolute()),
++        "-m",
++        "tensilelite_configure_client",
++        "--client",
++        str(client),
++    ]
++    assert calls[4][2]["env"]["TENSILELITE_ROCM_VERSION"] == "7.2.4"
++
++
++@pytest.mark.skipif(sys.platform != "linux", reason="invoke install is Linux-only")
++@pytest.mark.parametrize("create_non_executable", [False, True])
++def test_install_rejects_an_invalid_built_client(
++    tmp_path, monkeypatch, create_non_executable
++):
++    rocm_root = (tmp_path / "rocm").resolve()
++    rocm_root.mkdir()
++    (rocm_root / ".info").mkdir()
++    (rocm_root / ".info" / "version").write_text("7.2.4\n", encoding="utf-8")
++    if create_non_executable:
++        client = tasks._built_client_path(tmp_path / "build")
++        client.parent.mkdir(parents=True)
++        client.write_text("client", encoding="utf-8")
++
++    class Context:
++        def run(self, command, **kwargs):
++            pass
++
++    monkeypatch.setenv("ROCM_PATH", str(rocm_root))
++    monkeypatch.setattr(tasks, "rocisa", SimpleNamespace(body=lambda *args, **kwargs: None))
++    monkeypatch.setattr(
++        tasks, "build_client", SimpleNamespace(body=lambda *args, **kwargs: None)
++    )
++
++    with pytest.raises(tasks.Exit, match="Built tensilelite-client is missing or not executable"):
++        tasks.install.body(Context(), build_dir=str(tmp_path / "build"))
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_precommit_affected_tests.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_precommit_affected_tests.py
+index 9e08f53216aa919257eb3e8a985f89f0255f9bdd..9e7c65193d113911efb9825330f3be0b7d94547a 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_precommit_affected_tests.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_precommit_affected_tests.py
+@@ -161,9 +161,16 @@ def test_diagnose_env_failure_stale_interpreter(tmp_path):
+     assert "uv sync" in joined
+ 
+ 
+-@pytest.mark.parametrize("module", ["syrupy", "xdist"])
+-def test_diagnose_env_failure_missing_dependency(tmp_path, module):
+-    out = f"ModuleNotFoundError: No module named '{module}'"
++def test_diagnose_env_failure_missing_dependency(tmp_path):
++    out = "ModuleNotFoundError: No module named 'syrupy'"
++    lines = hook.diagnose_env_failure(out, tmp_path)
++    joined = "\n".join(lines)
++    assert "missing required packages" in joined
++    assert "uv sync" in joined
++
++
++def test_diagnose_env_failure_missing_xdist(tmp_path):
++    out = "ModuleNotFoundError: No module named 'xdist'"
+     lines = hook.diagnose_env_failure(out, tmp_path)
+     joined = "\n".join(lines)
+     assert "missing required packages" in joined
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_specs_amdsmi.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_specs_amdsmi.py
+index 6f79713912735aef39cc7bd93d933b0d404698b1..f3c2689f87eeab814e7edef5f7d6ac0aec28d141 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_specs_amdsmi.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_specs_amdsmi.py
+@@ -17,7 +17,7 @@ from unittest.mock import patch
+ import pytest
+ 
+ # specs.py lives outside the Tensile package, under the hipBLASLt client scripts.
+-# parents[4] == projects/hipblaslt (unit -> Tests -> Tensile -> tensilelite -> hipblaslt)
++# parents[5] == projects/hipblaslt (source_only -> unit -> Tests -> tensilelite -> tensilelite -> hipblaslt)
+ # In an installed/packaged test tree (e.g. CI's build/share/hipblaslt/...), the
+ # client scripts are not shipped next to the Tensile package, so specs.py is not
+ # importable there. Skip gracefully in that case rather than erroring at collection.

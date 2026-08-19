@@ -1,0 +1,80 @@
+diff --git a/projects/hipblaslt/tensilelite/setup.py b/projects/hipblaslt/tensilelite/setup.py
+index 2341396011974eb2521c9a9c8b768c0ff65d3d42..2bea1e2214916cf7c379e67a1ed8773991040ed3 100644
+--- a/projects/hipblaslt/tensilelite/setup.py
++++ b/projects/hipblaslt/tensilelite/setup.py
+@@ -14,12 +14,21 @@ _metadata = runpy.run_path(str(Path(__file__).with_name("release_metadata.py")))
+ 
+ def _build_rocm_version() -> str:
+     value = os.environ.get("TENSILELITE_ROCM_VERSION")
+-    if not value:
+-        raise RuntimeError(
+-            "TENSILELITE_ROCM_VERSION is required to build a TensileLite wheel. "
+-            "Use the CMake or Invoke build frontend, or supply the selected SDK identity explicitly."
+-        )
+-    return value
++    if value:
++        return value
++    if os.environ.get("TOX_ENV_NAME"):
++        version_file = Path(os.environ.get("ROCM_PATH", "/opt/rocm")) / ".info" / "version"
++        try:
++            return version_file.read_text(encoding="utf-8").strip()
++        except OSError as exc:
++            raise RuntimeError(
++                "Tox package setup requires TENSILELITE_ROCM_VERSION or a selected "
++                f"ROCM_PATH containing {version_file.relative_to(version_file.parent.parent)}."
++            ) from exc
++    raise RuntimeError(
++        "TENSILELITE_ROCM_VERSION=X.Y.Z is required to build a TensileLite wheel. "
++        "Use the CMake or Invoke build frontend, or supply the selected SDK base version explicitly."
++    )
+ 
+ 
+ class CleanBuildPy(build_py):
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
+index b615c3f5213e778548cf4f73068d62033b6f7823..c5be2a31e6a844e1cc18fa6a6883ed3adf9bc409 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
+@@ -2,7 +2,10 @@
+ # SPDX-License-Identifier: MIT
+ 
+ from pathlib import Path
++import os
+ import runpy
++import subprocess
++import sys
+ 
+ import pytest
+ 
+@@ -42,8 +46,31 @@ def test_distribution_version_rejects_invalid_base_version():
+         metadata["distribution_version"]("not-a-release")
+ 
+ 
++def test_tox_package_bootstrap_reads_the_selected_rocm_identity(tmp_path):
++    root = tmp_path / "rocm"
++    (root / ".info").mkdir(parents=True)
++    (root / ".info" / "version").write_text("7.2.4\n", encoding="utf-8")
++    environment = dict(
++        os.environ,
++        TOX_ENV_NAME="unit",
++        ROCM_PATH=str(root),
++    )
++    environment.pop("TENSILELITE_ROCM_VERSION", None)
++
++    result = subprocess.run(
++        [sys.executable, "setup.py", "--version"],
++        cwd=_SOURCE_ROOT,
++        env=environment,
++        capture_output=True,
++        text=True,
++    )
++
++    assert result.returncode == 0, result.stderr
++    assert result.stdout.strip() == "5.0.0+rocm7.2.4"
++
++
+ @pytest.mark.parametrize("value", ["5.0", "5.0.0.dev1", "v5.0.0", ""])
+-def test_component_version_rejects_non_release_values(tmp_path, monkeypatch, value):
++def test_component_version_rejects_non_release_values(tmp_path, value):
+     source = tmp_path / "source"
+     source.mkdir()
+     (source / "VERSION").write_text(value, encoding="utf-8")

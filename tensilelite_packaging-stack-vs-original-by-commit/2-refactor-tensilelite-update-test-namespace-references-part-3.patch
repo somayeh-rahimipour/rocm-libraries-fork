@@ -1,0 +1,12 @@
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
+index 697ebdf47317fe75a2f5a75068df8c161a1326ab..ee37a62acf6aa713a48d2b08c2b74056ba8c48b9 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/coverage-baseline.json
+@@ -10,6 +10,7 @@
+     "tensilelite/BenchmarkProblems.py": 81.22,
+     "tensilelite/BenchmarkSplitter.py": 97.92,
+     "tensilelite/BenchmarkStructs.py": 74.24,
++    "tensilelite/ClientExecutable.py": 100.0,
+     "tensilelite/ClientWriter.py": 74.63,
+     "tensilelite/Common/Architectures.py": 79.6,
+     "tensilelite/Common/Capabilities.py": 100.0,

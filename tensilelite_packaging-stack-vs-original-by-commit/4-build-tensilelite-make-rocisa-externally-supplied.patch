@@ -1,0 +1,15 @@
+diff --git a/projects/hipblaslt/tensilelite/tasks.py b/projects/hipblaslt/tensilelite/tasks.py
+index b8ec5c5c359ca3c3db9d006e53485b079e604eca..9bed0fa95b92554afce119e7087fc6d5001d108e 100644
+--- a/projects/hipblaslt/tensilelite/tasks.py
++++ b/projects/hipblaslt/tensilelite/tasks.py
+@@ -359,9 +362,7 @@ def build_client(
+ ):
+     """Build the tensilelite-client C++ executable.
+ 
+-    The build stages the client and installs TensileLite into a private Python
+-    environment. rocisa must already be importable in the invoking Python
+-    environment and is inherited as an external dependency.
++    rocisa must already be importable in the invoking Python environment.
+     """
+ 
+     if enable_asan and enable_tsan:

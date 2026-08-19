@@ -1,0 +1,51 @@
+diff --git a/projects/hipblaslt/tensilelite/scripts/precommit_affected_tests.py b/projects/hipblaslt/tensilelite/scripts/precommit_affected_tests.py
+index abf35bf6334ca68422c3e4fa05f0a47bf7e7ecdf..049d920a51bdd6f6b4bc4afb045a6baaf1e3a013 100755
+--- a/projects/hipblaslt/tensilelite/scripts/precommit_affected_tests.py
++++ b/projects/hipblaslt/tensilelite/scripts/precommit_affected_tests.py
+@@ -367,7 +367,7 @@ def main() -> int:
+     bar = "=" * 64
+     update_targets = failed_test_files(tl_root) or nodes
+     update_cmd = (
+-        f"ROCM_PATH={runtime_root} uv run --no-sync pytest --snapshot-update "
++        f"ROCM_PATH={test_env['ROCM_PATH']} uv run --no-sync pytest --snapshot-update "
+         + " ".join(update_targets)
+     )
+     log("")
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
+index b615c3f5213e778548cf4f73068d62033b6f7823..c5be2a31e6a844e1cc18fa6a6883ed3adf9bc409 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/source_only/test_release_metadata.py
+@@ -12,15 +15,16 @@ pytestmark = pytest.mark.unit
+ _SOURCE_ROOT = Path(__file__).resolve().parents[4]
+ 
+ 
+-def test_distribution_version_comes_from_explicit_rocm_identity():
++def test_distribution_version_comes_from_explicit_base_version():
+     metadata = runpy.run_path(str(_SOURCE_ROOT / "release_metadata.py"))
+ 
+     assert metadata["component_version"]() == "5.0.0"
+     assert metadata["distribution_version"]("7.2.4") == "5.0.0+rocm7.2.4"
+-    assert (
+-        metadata["distribution_version"]("10.1.0a20260813")
+-        == "5.0.0+rocm10.1.0a20260813"
+-    )
++
++
++def test_distribution_version_preserves_development_publication_identity():
++    metadata = runpy.run_path(str(_SOURCE_ROOT / "release_metadata.py"))
++
+     assert (
+         metadata["distribution_version"]("10.1.0.dev0+0123456789abcdef")
+         == "5.0.0+devrocm10.1.0.dev0.0123456789abcdef"
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/tensilelite_create_library/run.py b/projects/hipblaslt/tensilelite/tensilelite/tensilelite_create_library/run.py
+index 46e4d788c24191abea33080008a8cfe09496361b..3eccb2a6185de7ade998fb22a7853f7b5ac7af51 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/tensilelite_create_library/run.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/tensilelite_create_library/run.py
+@@ -51,7 +51,6 @@ from tensilelite.Common import (
+     print2,
+     printWarning,
+     printExit,
+-    printWarning,
+     state,
+     tqdm,
+     setVerbosity,

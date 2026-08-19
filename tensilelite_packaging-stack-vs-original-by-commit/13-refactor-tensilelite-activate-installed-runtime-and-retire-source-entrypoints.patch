@@ -1,0 +1,117 @@
+diff --git a/.github/scripts/run_rocjitsu_hipblaslt_race_check.sh b/.github/scripts/run_rocjitsu_hipblaslt_race_check.sh
+index 2eac00339be71634f9340041dc9019ff8444ea06..67230057d36ace77042d09ff80cbd7638b96aa1a 100755
+--- a/.github/scripts/run_rocjitsu_hipblaslt_race_check.sh
++++ b/.github/scripts/run_rocjitsu_hipblaslt_race_check.sh
+@@ -32,7 +32,7 @@ ROCJITSU_CONFIG="${ROCJITSU_CONFIG:-}"
+ RACE_REPORT_DIR="${RACE_REPORT_DIR:-${PWD}/race-reports}"
+ HIPBLASLT_BENCH="${HIPBLASLT_BENCH:-${ROCM_PATH}/bin/hipblaslt-bench}"
+ TENSILELITE_ROOT="${TENSILELITE_ROOT:-${ROCM_PATH}/share/hipblaslt/tensilelite}"
+-TENSILE_DRIVER="${TENSILE_DRIVER:-${TENSILELITE_ROOT}/Tensile/bin/Tensile}"
++TENSILELITE_PYTHON="${TENSILELITE_PYTHON:-python3}"
+ TENSILELITE_CLIENT="${TENSILELITE_CLIENT:-${ROCM_PATH}/libexec/hipblaslt/tensilelite/tensilelite-client}"
+ RACE_TIMEOUT_SECONDS="${RACE_TIMEOUT_SECONDS:-180}"
+ TENSILELITE_TIMEOUT_SECONDS="${TENSILELITE_TIMEOUT_SECONDS:-420}"
+@@ -129,11 +129,6 @@ if [[ ! -d "${TENSILELITE_ROOT}" ]]; then
+   exit 1
+ fi
+ 
+-if [[ ! -f "${TENSILE_DRIVER}" ]]; then
+-  echo "Tensile driver not found: ${TENSILE_DRIVER}" >&2
+-  exit 1
+-fi
+-
+ if [[ ! -x "${TENSILELITE_CLIENT}" ]]; then
+   echo "tensilelite-client not found or not executable: ${TENSILELITE_CLIENT}" >&2
+   exit 1
+@@ -197,7 +192,7 @@ echo "ROCJITSU_BUILD_DIR=${ROCJITSU_BUILD_DIR}"
+ echo "ROCJITSU_CONFIG=${ROCJITSU_CONFIG}"
+ echo "HIPBLASLT_BENCH=${HIPBLASLT_BENCH}"
+ echo "TENSILELITE_ROOT=${TENSILELITE_ROOT}"
+-echo "TENSILE_DRIVER=${TENSILE_DRIVER}"
++echo "TENSILELITE_PYTHON=${TENSILELITE_PYTHON}"
+ echo "TENSILELITE_CLIENT=${TENSILELITE_CLIENT}"
+ echo "LIBOMP_PATH=${LIBOMP_PATH}"
+ echo "RACE_REPORT_DIR=${RACE_REPORT_DIR}"
+@@ -205,6 +200,12 @@ echo "PATH=${PATH}"
+ echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+ echo "PYTHONPATH=${PYTHONPATH}"
+ 
++TENSILELITE_ROCM_VERSION="$(<"${ROCM_PATH}/.info/version")" \
++  "${TENSILELITE_PYTHON}" -m pip install \
++    --disable-pip-version-check --force-reinstall --no-deps --no-build-isolation \
++    "${TENSILELITE_ROOT}"
++"${TENSILELITE_PYTHON}" -m tensilelite_configure_client --ensure-client "${TENSILELITE_CLIENT}"
++
+ 
+ # TODO(newling): Track migration to a packaged rocjitsu once TheRock provides a
+ # complete runnable artifact. Until then, build rocjitsu from the rocm-systems
+@@ -377,7 +378,6 @@ run_tensilelite_client_check() {
+   local tensile_args=(
+     "${yaml}"
+     "${output_dir}"
+-    --prebuilt-client "${TENSILELITE_CLIENT}"
+     --gpu-targets "${ROCJITSU_GPU_TARGET}"
+     --library-format msgpack
+   )
+@@ -386,10 +386,9 @@ run_tensilelite_client_check() {
+   fi
+ 
+   echo "running tensilelite-client under rocjitsu race detection"
+-  # Drive the normal Tensile front end with the client from the TheRock artifact.
+-  # This covers a different surface from hipblaslt-bench: Python-side Tensile
+-  # setup, rocisa imports, generated client config, and the standalone
+-  # tensilelite-client runtime path.
++  # Drive the installed TensileLite command with the TheRock artifact client
++  # bound to this interpreter. This covers Python-side setup, rocisa imports,
++  # generated client config, and the standalone tensilelite-client runtime path.
+   timeout "${TENSILELITE_TIMEOUT_SECONDS}" \
+     env \
+       HSA_ENABLE_SDMA=1 \
+@@ -399,7 +398,7 @@ run_tensilelite_client_check() {
+       RJ_SINK_DIR="${sink_dir}" \
+       "${ROCJITSU_BIN}" \
+         --config "${ROCJITSU_CONFIG}" \
+-        -- python3 "${TENSILE_DRIVER}" "${tensile_args[@]}" \
++        -- "${TENSILELITE_PYTHON}" -m tensilelite run "${tensile_args[@]}" \
+     2>&1 | tee "${RACE_REPORT_DIR}/tensilelite-client.log"
+   local status=$?
+   if [[ "${status}" -ne 0 ]]; then
+diff --git a/.github/workflows/component-ci-tensilelite-coverage.yml b/.github/workflows/component-ci-tensilelite-coverage.yml
+index 20ed7fd6775f285c5038eb4aa1135e1cbabcf0bf..7b78d96dce139aa6902eb240134d4a626c840060 100644
+--- a/.github/workflows/component-ci-tensilelite-coverage.yml
++++ b/.github/workflows/component-ci-tensilelite-coverage.yml
+@@ -105,7 +105,7 @@ jobs:
+         working-directory: projects/hipblaslt/tensilelite
+         run: |
+           PY=.tox/coverage-unit/bin/python
+-          "$PY" Tensile/Tests/unit/characterization/tools/coverage_split_summary.py \
++          "$PY" tensilelite/Tests/unit/characterization/tools/coverage_split_summary.py \
+             --characterization char.json --unit unit.json --combined coverage.json \
+             --characterization-junit char_tests.xml --unit-junit unit_tests.xml || true
+           exit 0
+diff --git a/projects/hipblaslt/README.md b/projects/hipblaslt/README.md
+index 793bc3625482a3b84e863920800784f8a211b69c..60e00c5c5a57251052605a8ffbbac6d4cad67302 100644
+--- a/projects/hipblaslt/README.md
++++ b/projects/hipblaslt/README.md
+@@ -269,8 +269,8 @@ inv build --architecture gfx1100 --clean
+ * `HIPBLASLT_TENSILE_LIBPATH` Path to output the device gemm libraries (default: `build/Tensile`)
+ 
+ > [!NOTE]
+-> To determine defaults for the `TensileCreateLibrary` command generated when building the device
+-> libraries, run `Tensile/bin/TensileCreateLibrary --help` from the tensilelite directory.
++> To determine defaults for the create-library command generated when building the device
++> libraries, run `python -m tensilelite create-library --help` from the tensilelite directory.
+ 
+ > [!NOTE]
+ > Refer to the tensilelite [README](./tensilelite/README.md) for instructions on building for the tensile workflow.
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/__init__.py b/projects/hipblaslt/tensilelite/tensilelite/__init__.py
+index 4100d1affccd4ce9724ac78880fb566d4a7bb200..32b3218763c9d56fdb40b834adefb1b096b2b722 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/__init__.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/__init__.py
+@@ -19,4 +19,4 @@ __all__ = [
+     "__version__",
+ ]
+ 
+-_runtime.initialize()
+\ No newline at end of file
++_runtime.initialize()

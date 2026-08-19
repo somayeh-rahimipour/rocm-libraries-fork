@@ -1,0 +1,110 @@
+diff --git a/projects/hipblaslt/utilities/geko/geko/library/operations.py b/projects/hipblaslt/utilities/geko/geko/library/operations.py
+index 3affeec625d259977dd6a1e85e32431dad2398ff..7c45984cfe059e808a70c276deec5f4069ecccbe 100644
+--- a/projects/hipblaslt/utilities/geko/geko/library/operations.py
++++ b/projects/hipblaslt/utilities/geko/geko/library/operations.py
+@@ -370,8 +370,9 @@ def normalize(library_path: str | Path, output_path: str | Path, hipblaslt_path:
+     Args:
+         library_path (str | Path): Path to the input library.
+         output_path (str | Path): Path to the output normalized library.
+-        hipblaslt_path (str | Path, optional): Path to hipBLASLt installation. 
+-            If set, will append the path to sys.path to find TensileLite.
++        hipblaslt_path (str | Path, optional): Path to a hipBLASLt installation
++            retained for caller validation; TensileLite is always imported from
++            the active Python environment.
+ 
+     Raises:
+         FileNotFoundError: If library path does not exist.
+@@ -384,16 +385,13 @@ def normalize(library_path: str | Path, output_path: str | Path, hipblaslt_path:
+         hipblaslt_path = Path(hipblaslt_path)
+         if not hipblaslt_path.is_dir():
+             raise FileNotFoundError(f"hipBLASLt path not found: '{hipblaslt_path}'")
+-        import sys
+-        sys.path.append(str(hipblaslt_path / "tensilelite"))
+-
+     try:
+         from tensilelite import LibraryIO
+         from tensilelite.CustomYamlLoader import load_yaml_stream
+         from tensilelite.merge_library import convertToDict, normalizeDictLibraryLayout
+     except ImportError as e:
+         raise ImportError(
+-            "Failed to import TensileLite. Install it or pass the correct path to hipBLASLt. "
++            "Failed to import TensileLite from the active Python environment. Install it before running GEKO. "
+             f"Error: {e}."
+         ) from e
+     
+diff --git a/projects/hipblaslt/utilities/geko/tests/conftest.py b/projects/hipblaslt/utilities/geko/tests/conftest.py
+index 218a3e9a998550565f26013b3374d723f84dbcd7..a047df1dacbf6876f8cc850ca706dcbb666a4f3e 100644
+--- a/projects/hipblaslt/utilities/geko/tests/conftest.py
++++ b/projects/hipblaslt/utilities/geko/tests/conftest.py
+@@ -5,7 +5,6 @@
+ 
+ from __future__ import annotations
+ 
+-import sys
+ from pathlib import Path
+ 
+ import pytest
+@@ -126,23 +125,14 @@ def repo_root() -> Path:
+ def tensilelite_sys_path(hipblaslt_path):
+     if not hipblaslt_path:
+         pytest.skip("Requires --hipblaslt-path")
+-    tl = Path(hipblaslt_path) / "tensilelite"
+-    if not tl.is_dir():
++    if not (Path(hipblaslt_path) / "tensilelite").is_dir():
+         pytest.skip(f"tensilelite not found under {hipblaslt_path}")
+-    s = str(tl)
+-    sys.path.insert(0, s)
+-    # The directory existing does not guarantee rocisa was built/installed in this
+-    # checkout. TensileLite imports rocisa (a compiled nanobind extension) lazily, so
+-    # without this guard a missing rocisa surfaces as an error deep inside a test
+-    # rather than a clean skip. See tox -e integration to provision the env.
++    pytest.importorskip(
++        "tensilelite",
++        reason="TensileLite must be installed in the active GEKO interpreter.",
++    )
+     pytest.importorskip(
+         "rocisa",
+-        reason=f"rocisa not importable from {tl}; build it (e.g. tox -e integration).",
++        reason="rocisa must be importable in the active GEKO interpreter.",
+     )
+-    try:
+-        yield
+-    finally:
+-        try:
+-            sys.path.remove(s)
+-        except ValueError:
+-            pass
++    yield
+diff --git a/projects/hipblaslt/utilities/geko/tests/test_library_operations_unit.py b/projects/hipblaslt/utilities/geko/tests/test_library_operations_unit.py
+index b97160597b3b26f9dfa12a08aec672b468a2a7b1..54cb05053793206fb361584c13c664593db06703 100644
+--- a/projects/hipblaslt/utilities/geko/tests/test_library_operations_unit.py
++++ b/projects/hipblaslt/utilities/geko/tests/test_library_operations_unit.py
+@@ -683,15 +683,13 @@ def test_normalize_calls_tensilelite_pipeline(monkeypatch: pytest.MonkeyPatch, t
+     assert calls["write"] == (str(out), {"converted": True})
+ 
+ 
+-def test_normalize_appends_tensilelite_to_sys_path_when_hipblaslt_given(
++def test_normalize_does_not_mutate_sys_path_when_hipblaslt_given(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     lib = tmp_path / "lib.yaml"
+     lib.touch()
+     hip = tmp_path / "hip"
+     hip.mkdir()
+-    expected = str(hip / "tensilelite")
+-
+     calls: dict = {}
+     for mod_name, mod in _make_tensilelite_mocks(calls).items():
+         monkeypatch.setitem(sys.modules, mod_name, mod)
+@@ -699,10 +697,7 @@ def test_normalize_appends_tensilelite_to_sys_path_when_hipblaslt_given(
+     original_path = list(sys.path)
+     operations.normalize(lib, tmp_path / "out.yaml", hipblaslt_path=hip)
+ 
+-    assert expected in sys.path
+-    # cleanup to avoid polluting other tests
+-    if expected not in original_path:
+-        sys.path.remove(expected)
++    assert sys.path == original_path
+ 
+ 
+ # ---------------------------------------------------------------------------

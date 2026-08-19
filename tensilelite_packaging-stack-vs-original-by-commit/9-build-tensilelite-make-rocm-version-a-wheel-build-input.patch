@@ -1,0 +1,21 @@
+diff --git a/projects/hipblaslt/tensilelite/tasks.py b/projects/hipblaslt/tensilelite/tasks.py
+index b8ec5c5c359ca3c3db9d006e53485b079e604eca..9bed0fa95b92554afce119e7087fc6d5001d108e 100644
+--- a/projects/hipblaslt/tensilelite/tasks.py
++++ b/projects/hipblaslt/tensilelite/tasks.py
+@@ -38,6 +38,7 @@ def _detect_rocm():
+ 
+     return "/opt/rocm"
+ 
++
+ def _rocm_base_version(rocm_root: pathlib.Path) -> str:
+     version_file = rocm_root / ".info" / "version"
+     try:
+@@ -50,6 +51,8 @@ def _rocm_base_version(rocm_root: pathlib.Path) -> str:
+     if not version:
+         raise Exit(f"Selected ROCm version metadata is empty: {version_file}", code=1)
+     return version
++
++
+ def detect_gpu_arch():
+     try:
+         result = subprocess.run(["rocm_agent_enumerator", "-v"], capture_output=True, text=True, timeout=5, check=True)

@@ -1,0 +1,62 @@
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/GenerateSummations/test_generate_summations_char.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/GenerateSummations/test_generate_summations_char.py
+index d11411e3edf4dddb3051516761d92fe2e34cfb57..55c90058aeafb1ea527d3b1702174266e80b7dec 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/GenerateSummations/test_generate_summations_char.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/characterization/GenerateSummations/test_generate_summations_char.py
+@@ -1,21 +1,13 @@
+ ################################################################################
+ # Characterization tests for tensilelite.GenerateSummations — summation model fitting.
+ #
+-# ADD-ONLY. GenerateSummations.py exports createLibraryForBenchmark (lines 47–63),
+-# a subprocess wrapper, and GenerateSummations (lines 65–188), a high-level
+-# orchestrator for logic parsing, library creation, benchmark execution, and CSV
+-# analysis. This suite pins the wrapper function (createLibraryForBenchmark) and
+-# exercises GenerateSummations if pandas/numpy are available. The main path
+-# (lines 65–188) is uncovered (0%) due to module-level pandas import; we test
+-# it via comprehensive mocking that allows control flow execution.
++# Characterization tests for the GenerateSummations create-library dispatch.
++# CSV parsing behavior is covered separately by the focused csv/NumPy unit test.
+ ################################################################################
+ import importlib
+-import os
+-import subprocess
+-import sys
+ import tempfile
+ from pathlib import Path
+-from unittest.mock import MagicMock, Mock, patch, ANY
++from unittest.mock import patch
+ 
+ import pytest
+ 
+@@ -91,4 +83,3 @@ def test_create_library_for_benchmark_error_handling():
+ 
+ 
+ 
+-
+diff --git a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_generate_summations_csv.py b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_generate_summations_csv.py
+index 7736ba1226a1f14fff5175391878eb3f66d2cd36..fe6bedf084af16b145127971d76c13fe690a3aed 100644
+--- a/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_generate_summations_csv.py
++++ b/projects/hipblaslt/tensilelite/tensilelite/Tests/unit/test_generate_summations_csv.py
+@@ -13,15 +13,17 @@ pytestmark = pytest.mark.unit
+ def test_benchmark_csv_preserves_size_order_and_fitting_vectors(tmp_path):
+     benchmark = tmp_path / "benchmark.csv"
+     benchmark.write_text(
+-        ' "SizeL" ,"Cij0","kernel one"\n'
+-        '32,10,4\n'
+-        '16,nan,2\n'
+-        '64,30,8\n',
++        ' "SizeL" ,"Cij0","Cij1","kernel one"\n'
++        '32,10,5,4\n'
++        '16,nan,31,2\n'
++        '32,9,7,5\n'
++        '64,30,8,8\n',
+         encoding="utf-8",
+     )
+ 
+     sizes, columns, maximum = _read_benchmark_data(benchmark)
+ 
+     np.testing.assert_array_equal(sizes, [32.0, 16.0, 64.0])
+-    np.testing.assert_array_equal(columns["kernel one"], [4.0, 2.0, 8.0])
+-    assert maximum == 30.0
++    np.testing.assert_array_equal(columns["Cij1"], [5.0, 31.0, 7.0, 8.0])
++    np.testing.assert_array_equal(columns["kernel one"], [4.0, 2.0, 5.0, 8.0])
++    assert maximum == 31.0

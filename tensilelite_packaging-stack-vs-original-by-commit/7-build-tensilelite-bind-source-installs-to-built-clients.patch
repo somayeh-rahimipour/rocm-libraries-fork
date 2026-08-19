@@ -1,0 +1,58 @@
+diff --git a/projects/hipblaslt/tensilelite/tasks.py b/projects/hipblaslt/tensilelite/tasks.py
+index b8ec5c5c359ca3c3db9d006e53485b079e604eca..9bed0fa95b92554afce119e7087fc6d5001d108e 100644
+--- a/projects/hipblaslt/tensilelite/tasks.py
++++ b/projects/hipblaslt/tensilelite/tasks.py
+@@ -416,12 +417,12 @@ def build_client(
+             cmake_cmd.append("-DTENSILELITE_ENABLE_HOST_ASAN=ON")
+         if enable_tsan:
+             cmake_cmd.append("-DTENSILELITE_ENABLE_HOST_TSAN=ON")
+-
+         c.run(shlex.join(cmake_cmd))
+ 
+     if build:
+         c.run(shlex.join(["cmake", "--build", build_dir, "--parallel"]))
+ 
++
+ @task(help={"build_dir": "CMake build directory containing tensilelite-client."})
+ def configure_client(c, build_dir="build_tmp"):
+     """Bind this Python installation to a previously built client."""
+@@ -437,10 +438,12 @@ def configure_client(c, build_dir="build_tmp"):
+             ]
+         )
+     )
++
++
+ @task(
+     help={
+         "clean": "Remove the client build directory before building.",
+-        "build_dir": "Path to the client build and staged ROCm root.",
++        "build_dir": "Path to the client build directory.",
+         "build_type": "CMake build type (for example Release or Debug).",
+         "gpu_targets": "Comma-separated GPU targets; detected when omitted.",
+         "rocm_path": "ROCm installation used to build and version the package.",
+@@ -490,7 +493,7 @@ def install(
+         build_dir=build_dir,
+         build_type=build_type,
+         gpu_targets=gpu_targets,
+-        rocm_path=rocm_path,
++        rocm_path=str(rocm),
+         export_compile_commands=export_compile_commands,
+         enable_rocprof=enable_rocprof,
+         cxx_flags_release=cxx_flags_release,
+@@ -535,6 +538,8 @@ def install(
+         env=env,
+     )
+     print(f"TensileLite editable install uses: {built_client}")
++
++
+ @task
+ def precommit_install(c):
+     """Install the hipblaslt/TensileLite git pre-commit hook (run once after `uv sync`).
+@@ -636,6 +641,7 @@ def build_coverage(
+     c.run(shlex.join(cmake_cmd))
+     c.run(shlex.join(["cmake", "--build", build_dir, "--parallel"]))
+ 
++
+ def _built_client_path(build_dir):
+     executable = "tensilelite-client.exe" if sys.platform == "win32" else "tensilelite-client"
+     return pathlib.Path(build_dir).resolve() / "tensilelite" / "client" / executable

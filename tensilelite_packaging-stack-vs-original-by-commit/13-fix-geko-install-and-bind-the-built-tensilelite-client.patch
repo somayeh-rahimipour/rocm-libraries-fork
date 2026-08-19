@@ -1,0 +1,170 @@
+diff --git a/projects/hipblaslt/utilities/geko/geko/utils.py b/projects/hipblaslt/utilities/geko/geko/utils.py
+index 586c61602c067fb9f1f6903c4a04d9fbcbbd4f07..306767a300e40b6b65702ee324d0d7a04ced8a2a 100644
+--- a/projects/hipblaslt/utilities/geko/geko/utils.py
++++ b/projects/hipblaslt/utilities/geko/geko/utils.py
+@@ -8,6 +8,7 @@ from __future__ import annotations
+ import subprocess
+ import shutil
+ import sys
++import os
+ import logging
+ import hashlib
+ 
+@@ -31,7 +32,9 @@ def compute_file_sha256(path: str | Path) -> str:
+ 
+ 
+ 
+-def run_silent_command(cmd: List[str], cwd: str | Path = None) -> None:
++def run_silent_command(
++    cmd: List[str], cwd: str | Path = None, env: dict[str, str] | None = None
++) -> None:
+     """Execute a shell command with silent stdout and error handling.
+ 
+     Args:
+@@ -47,6 +50,7 @@ def run_silent_command(cmd: List[str], cwd: str | Path = None) -> None:
+         stdout=subprocess.DEVNULL,
+         stderr=subprocess.PIPE,
+         cwd=cwd,
++        env=env,
+         text=True,
+     )
+     _, err = proc.communicate()
+@@ -148,7 +152,8 @@ def build_tensilelite_client(hipblaslt_path: str | Path, build_dir: str | Path =
+             "--no-deps",
+             "--editable",
+             tensilelite_path,
+-        ]
++        ],
++        env=_tensilelite_build_environment(),
+     )
+     run_silent_command(
+         [
+@@ -162,6 +167,30 @@ def build_tensilelite_client(hipblaslt_path: str | Path, build_dir: str | Path =
+     return client_path
+ 
+ 
++def _tensilelite_build_environment() -> dict[str, str]:
++    """Return the active interpreter environment with an explicit ROCm identity."""
++    environment = os.environ.copy()
++    if environment.get("TENSILELITE_ROCM_VERSION"):
++        return environment
++    if "ROCM_PATH" in environment and not environment["ROCM_PATH"]:
++        raise RuntimeError(
++            "GEKO cannot build TensileLite with ROCM_PATH set but empty; "
++            "set ROCM_PATH to a ROCm installation or unset it."
++        )
++    rocm_root = Path(environment.get("ROCM_PATH", "/opt/rocm"))
++    version_file = rocm_root / ".info" / "version"
++    try:
++        environment["TENSILELITE_ROCM_VERSION"] = version_file.read_text(
++            encoding="utf-8"
++        ).strip()
++    except OSError as exc:
++        raise RuntimeError(
++            "GEKO could not determine the ROCm identity for its TensileLite editable install; "
++            f"set TENSILELITE_ROCM_VERSION or provide {version_file}."
++        ) from exc
++    return environment
++
++
+ def parse_devices(devices: str | list[int]) -> List[int]:
+     """Parse device specification into a list of device IDs.
+ 
+diff --git a/projects/hipblaslt/utilities/geko/tests/test_utils_unit.py b/projects/hipblaslt/utilities/geko/tests/test_utils_unit.py
+index b0ce3fb63ddb95befbe3fa53780e6a911db50725..0c7a7bedccd4fbb7cc2c7d3e21b20b5cc5478bd8 100644
+--- a/projects/hipblaslt/utilities/geko/tests/test_utils_unit.py
++++ b/projects/hipblaslt/utilities/geko/tests/test_utils_unit.py
+@@ -76,13 +76,18 @@ def test_build_tensilelite_client_build_and_cached_paths(monkeypatch: pytest.Mon
+     monkeypatch.setattr(utils, "find_spec", lambda _n: object())
+ 
+     built = {"n": 0}
++    calls = []
+ 
+-    def _fake_run(_cmd, cwd=None):
++    def _fake_run(_cmd, cwd=None, env=None):
+         built["n"] += 1
++        calls.append((_cmd, cwd, env))
+         client.parent.mkdir(parents=True, exist_ok=True)
+         client.write_text("bin\n")
+ 
+     monkeypatch.setattr(utils, "run_silent_command", _fake_run)
++    monkeypatch.setattr(
++        utils, "_tensilelite_build_environment", lambda: {"TENSILELITE_ROCM_VERSION": "7.2.4"}
++    )
+ 
+     out1 = utils.build_tensilelite_client(hip, build_dir=build_dir)
+     assert out1 == client
+@@ -92,3 +97,73 @@ def test_build_tensilelite_client_build_and_cached_paths(monkeypatch: pytest.Mon
+     out2 = utils.build_tensilelite_client(hip, build_dir=build_dir)
+     assert out2 == client
+     assert built["n"] == 5
++    assert calls[0] == (["invoke", "build-client", "--build-dir", build_dir], tensile, None)
++    assert calls[1][0] == [
++        utils.sys.executable,
++        "-m",
++        "pip",
++        "install",
++        "--no-build-isolation",
++        "--no-deps",
++        "--editable",
++        tensile,
++    ]
++    assert calls[1][2]["TENSILELITE_ROCM_VERSION"] == "7.2.4"
++    assert calls[2] == (
++        [
++            utils.sys.executable,
++            "-m",
++            "tensilelite_configure_client",
++            "--ensure-client",
++            client,
++        ],
++        None,
++        None,
++    )
++    assert calls[3][0] == calls[1][0]
++    assert calls[3][2]["TENSILELITE_ROCM_VERSION"] == "7.2.4"
++    assert calls[4][0] == calls[2][0]
++
++
++def test_tensilelite_build_environment_reads_the_selected_rocm_identity(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    root = tmp_path / "rocm"
++    (root / ".info").mkdir(parents=True)
++    (root / ".info" / "version").write_text("7.2.4\n", encoding="utf-8")
++    monkeypatch.delenv("TENSILELITE_ROCM_VERSION", raising=False)
++    monkeypatch.setenv("ROCM_PATH", str(root))
++
++    assert utils._tensilelite_build_environment()["TENSILELITE_ROCM_VERSION"] == "7.2.4"
++
++
++def test_tensilelite_build_environment_prefers_an_explicit_identity(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setenv("ROCM_PATH", "")
++    monkeypatch.setenv("TENSILELITE_ROCM_VERSION", "10.1.0a20260813")
++
++    assert (
++        utils._tensilelite_build_environment()["TENSILELITE_ROCM_VERSION"]
++        == "10.1.0a20260813"
++    )
++
++
++def test_tensilelite_build_environment_reports_missing_metadata(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    monkeypatch.delenv("TENSILELITE_ROCM_VERSION", raising=False)
++    monkeypatch.setenv("ROCM_PATH", str(tmp_path / "rocm"))
++
++    with pytest.raises(RuntimeError, match="could not determine the ROCm identity"):
++        utils._tensilelite_build_environment()
++
++
++def test_tensilelite_build_environment_rejects_empty_rocm_path(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.delenv("TENSILELITE_ROCM_VERSION", raising=False)
++    monkeypatch.setenv("ROCM_PATH", "")
++
++    with pytest.raises(RuntimeError, match="ROCM_PATH set but empty"):
++        utils._tensilelite_build_environment()
