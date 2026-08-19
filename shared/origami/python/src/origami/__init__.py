@@ -92,10 +92,8 @@ try:
     )
 except ImportError as e:
     raise ImportError(
-        "Failed to import the origami compiled extension. Its ROCm "
-        "dependencies (liborigami, libamdhip64) were not found. Install the "
-        "ROCm wheels (`pip install rocm[libraries]`).\n"
-        f"Original error: {e}"
+        "Failed to import the origami compiled extension or one of its "
+        f"native dependencies.\nOriginal error: {e}"
     ) from e
 
 __version__ = "0.1.0"
