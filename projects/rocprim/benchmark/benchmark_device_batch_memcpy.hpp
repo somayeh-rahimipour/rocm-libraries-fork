@@ -48,7 +48,8 @@
 #include <utility>
 #include <vector>
 
-template<bool IsMemCpy,
+template<typename Config,
+         bool IsMemCpy,
          typename InputBufferItType,
          typename OutputBufferItType,
          typename BufferSizeItType>
@@ -62,23 +63,23 @@ void batch_copy(void*              temporary_storage,
 {
     if constexpr(IsMemCpy)
     {
-        HIP_CHECK(rocprim::batch_memcpy(temporary_storage,
-                                        storage_size,
-                                        sources,
-                                        destinations,
-                                        sizes,
-                                        num_copies,
-                                        stream));
+        HIP_CHECK(rocprim::batch_memcpy<Config>(temporary_storage,
+                                                storage_size,
+                                                sources,
+                                                destinations,
+                                                sizes,
+                                                num_copies,
+                                                stream));
     }
     else
     {
-        HIP_CHECK(rocprim::batch_copy(temporary_storage,
-                                      storage_size,
-                                      sources,
-                                      destinations,
-                                      sizes,
-                                      num_copies,
-                                      stream));
+        HIP_CHECK(rocprim::batch_copy<Config>(temporary_storage,
+                                              storage_size,
+                                              sources,
+                                              destinations,
+                                              sizes,
+                                              num_copies,
+                                              stream));
     }
 }
 
@@ -361,7 +362,7 @@ private:
 
         size_t                                     temp_storage_bytes = 0;
         BatchMemcpyData<ValueType, BufferSizeType> data;
-        batch_copy<IsMemCpy>(nullptr,
+        batch_copy<Config, IsMemCpy>(nullptr,
                              temp_storage_bytes,
                              data.d_buffer_srcs.get(),
                              data.d_buffer_dsts.get(),
@@ -385,7 +386,7 @@ private:
         state.run(
             [&]
             {
-                batch_copy<IsMemCpy>(d_temp_storage.get(),
+                batch_copy<Config, IsMemCpy>(d_temp_storage.get(),
                                      temp_storage_bytes,
                                      data.d_buffer_srcs.get(),
                                      data.d_buffer_dsts.get(),
