@@ -92,14 +92,9 @@ try:
     )
 except ImportError as e:
     raise ImportError(
-        "Failed to import the origami compiled extension. Its native "
-        "dependencies (liborigami.so.1, libamdhip64) were not found by the "
-        "dynamic loader. On Linux, make liborigami.so.1 and the ROCm runtime "
-        "visible to the loader via the extension's RPATH, LD_LIBRARY_PATH, or "
-        "ldconfig; the ELF loader does not consult ROCM_PATH / HIP_PATH, and a "
-        "ROCm SDK installed only under a Python site-packages prefix is not on "
-        "the loader path by default. On Windows, set ROCM_PATH / HIP_PATH to a "
-        "ROCm install or build tree whose bin/ holds the ROCm DLLs.\n"
+        "Failed to import the origami compiled extension. Its ROCm "
+        "dependencies (liborigami, libamdhip64) were not found. Install the "
+        "ROCm wheels (`pip install rocm[libraries]`).\n"
         f"Original error: {e}"
     ) from e
 
