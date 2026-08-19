@@ -369,6 +369,26 @@ def isPow2(n):
     """True when ``n`` is a positive power of two."""
     return n > 0 and (n & (n - 1)) == 0
 
+def streamKClusterFactors(d):
+    """Return (Cs, Ck, C, is2D) for a StreamK workgroup cluster.
+
+    ClusterDim = [Cs, Ck] fully describes the cluster; C = Cs*Ck.
+    ``is2D`` is True when Ck > 1.
+
+    On StreamKForceDPOnly=1 both axes are spatial multicast (Cs = M-adjacent
+    B-peers, Ck = N-adjacent A-peers). On StreamKForceDPOnly=0 the axes split:
+      * [C, 1] -> Cs=C, Ck=1 : 1-D cluster, no multicast (existing SK3 path)
+      * [1, C] -> Cs=1, Ck=C : pure K-split cluster reduction
+      * [Cs,Ck] both > 1     : Target A (2-D A+B multicast in the DP window,
+        ordinary SK-tail loads, cluster-barrier reduction of SK partials)
+
+    ``d`` may be a kernel or a solution ``state`` dict. Uses ``.get`` for
+    partial-state call sites that omit ClusterDim.
+    """
+    cd = d.get("ClusterDim", [1, 1])
+    cs, ck = cd[0], cd[1]
+    return cs, ck, cs * ck, (ck > 1)
+
 def streamKMulticast(d):
     """True when the StreamK=3 cluster multicast path is active.
 
@@ -377,32 +397,59 @@ def streamKMulticast(d):
     tiles) IS the cluster multicast path, so there is no separate state key to
     store or serialize.
 
-    StreamKForceDPOnly=1 is part of the condition, not an extra gate the callers
-    add: only the DP-only schedule launches over the real M x N tile space that
-    the mask derivation, the tile-index fold and the padded-peer exit assume.
-    The two-tile (FDPO=0) SK3 cluster is cluster *reduction*, which predates this
-    path and must keep emitting exactly what it emits without any of it.
+    ForceDPOnly=1 launches over the real M x N tile space the mask derivation,
+    tile-index fold and padded-peer exit assume, so any Cs > 1 is multicast
+    (1-D [Cs,1] or 2-D [Cs,Ck] A+B). ForceDPOnly=0 keeps the existing 1-D
+    [Cs,1] cluster as a non-multicast SK3 launch; multicast there is the
+    Target A [Cs,Ck] case (A+B spatial multicast in DP).
 
     ``d`` may be a kernel or a solution ``state`` dict; both expose "StreamK"
     and "ClusterDim". Uses ``.get`` for partial-state derivation call sites that
     construct a dict without a StreamK / ClusterDim / StreamKForceDPOnly key.
     """
-    return (d.get("StreamK", 0) == 3
-            and d.get("ClusterDim", [1, 1])[0] > 1
-            and bool(d.get("StreamKForceDPOnly", 0)))
+    cs, ck, _c, _is2d = streamKClusterFactors(d)
+    if d.get("StreamK", 0) != 3 or cs <= 1:
+        return False
+    if d.get("StreamKForceDPOnly", 0):
+        return True
+    return ck > 1
 
 def streamK2DMulticast(d):
-    """True when the cluster multicasts A as well as B, i.e. Ck > 1.
+    """True when SK3 multicasts A as well as B (both ClusterDim axes > 1).
 
     ClusterDim = [Cs, Ck] with BOTH axes > 1: Cs/X peers share B on M-adjacent
-    tiles and Ck/Y peers share A on N-adjacent tiles. A 1-D [Cs, 1] cluster is
-    the Ck == 1 degenerate of the same shape -- A simply has no peers there.
+    tiles and Ck/Y peers share A on N-adjacent tiles. True for ForceDPOnly=1
+    (every tile is a complete DP tile) and ForceDPOnly=0 Target A (the same
+    2-D spatial grouping in the DP window, then an SK tail).
 
     ``d`` may be a kernel or a solution ``state`` dict; uses ``.get`` for
     partial-state derivation call sites.
     """
-    clusterDim = d.get("ClusterDim", [1, 1])
-    return clusterDim[0] > 1 and clusterDim[1] > 1
+    cs, ck, _c, _is2d = streamKClusterFactors(d)
+    return d.get("StreamK", 0) == 3 and cs > 1 and ck > 1
+
+def streamKDual2D(d):
+    """True for Target A: SK3 ForceDPOnly=0 with both ClusterDim axes > 1.
+
+    DP uses 2-D spatial A+B multicast; the SK tail uses ordinary loads and
+    cluster-barrier reduction of partials.
+    """
+    return streamK2DMulticast(d) and not d.get("StreamKForceDPOnly", 0)
+
+def streamKClusterReduction(d):
+    """True when StreamK=3 ForceDPOnly=0 uses the cluster for SK partials.
+
+    ClusterDim[1] = Ck > 1 on the two-tile path: [1,C] is pure K-split
+    reduction and [Cs,Ck] is Target A (cluster-barrier reduction on the SK
+    tail). ForceDPOnly=1 never K-splits, so this is False there.
+
+    ``d`` may be a kernel or a solution ``state`` dict; uses ``.get`` for
+    partial-state derivation call sites.
+    """
+    _cs, ck, _c, _is2d = streamKClusterFactors(d)
+    return (d.get("StreamK", 0) == 3
+            and not d.get("StreamKForceDPOnly", 0)
+            and ck > 1)
 
 def log2(x):
     return int(log(x, 2) + 0.5)

@@ -37,7 +37,7 @@ from Tensile.Common import assignParameterWithDefault, IsaInfo, \
                     print2, printExit, printWarning, \
                     roundUp, INDEX_CHARS, IsaVersion, SemanticVersion, \
                     roundUpToNearestMultiple, effectiveMatrixInstMN, isPow2, \
-                    streamKMulticast, streamK2DMulticast
+                    streamKMulticast, streamK2DMulticast, streamKClusterReduction
 from Tensile.Common.DataType import DataType
 from Tensile.Common.TypeValidationErrors import ConfigTypeError
 from Tensile.SolutionStructs.LdsPadding import get_fp4_mt_config, get_fp8_mt_config, get_mxs_mt_config, \
@@ -253,17 +253,20 @@ def _validateStreamKClusterShape(cs, ck):
 def _validateStreamKMulticast(state, printRejectionReason, isaInfoMap):
   """Validate the gfx1250 StreamK cluster cooperative-load (multicast) path.
 
-  The cluster co-locates ClusterDim = [Cs, Ck] StreamK workgroups: the Cs
-  M-adjacent peers share the same B over full K and the Ck N-adjacent peers
-  share the same A, so each operand is TDM-multicast across the peers that reuse
-  it. Sizes that are not a cluster multiple need no build-time check: the launch
-  rounds the grid up, the padded boundary peers s_endpgm before the -3 cluster
-  barrier, and the broadcast masks are trimmed to the peers actually present.
+  The cluster co-locates ClusterDim = [Cs, Ck] StreamK workgroups. On
+  ForceDPOnly=1 both axes are spatial: Cs M-adjacent peers share B and Ck
+  N-adjacent peers share A. On ForceDPOnly=0 the Target A [Cs,Ck] case
+  uses the same 2-D spatial A+B multicast in the DP window (the SK tail
+  drops to ordinary loads). Sizes that are not a cluster multiple need no
+  build-time check: the launch rounds the grid up, the padded boundary
+  peers s_endpgm before the -3 cluster barrier, and the broadcast masks
+  are trimmed to the peers actually present.
 
-  The path is auto-derived from StreamK=3 + ClusterDim != [1, 1] +
-  StreamKForceDPOnly=1, so the checks below reject an unusable cluster rather
-  than an explicit opt-in. They deliberately do not reach the FDPO=0 SK3
-  cluster (cluster reduction), which develop never constrained.
+  The path is auto-derived from StreamK=3 + ClusterDim[0] > 1 plus either
+  StreamKForceDPOnly=1 (spatial DP multicast) or ForceDPOnly=0 with
+  ClusterDim[1] > 1 (Target A 2-D DP multicast). ForceDPOnly=0 [Cs,1]
+  stays the existing non-multicast SK3 cluster. Cluster reduction (Ck > 1
+  on ForceDPOnly=0) is validated separately by _validateStreamKClusterReduction.
   """
   if not streamKMulticast(state):
     return True
@@ -323,6 +326,73 @@ def _validateStreamKMulticast(state, printRejectionReason, isaInfoMap):
   if state["TDMInst"] != 3:
     reject(state, printRejectionReason,
            "StreamKMulticast requires TDMInst == 3 (TDM multicast loads on A and B)")
+    return False
+
+  return True
+
+
+def _validateStreamKClusterReduction(state, printRejectionReason, isaInfoMap):
+  """Validate the gfx1250 StreamK cluster K-split reduction path.
+
+  ForceDPOnly=0 + ClusterDim[1] = Ck > 1 co-locates SK-partial peers in a
+  workgroup cluster. Pure [1,C] reduces via the cluster split barrier on a
+  C-way K-split of every tile. Target A [Cs,Ck] uses the same cluster-barrier
+  fixup on the SK tail after 2-D DP multicast (validated by
+  _validateStreamKMulticast). itersPerTile % Ck == 0 is enforced at
+  problem-select time by ClusterReductionIterCheck for pure [1,C] only
+  (problem K is not known at derive time). Target A uses standard two-tile
+  SK accounting, so that even-K-split check does not apply.
+  """
+  if not streamKClusterReduction(state):
+    return True
+
+  if state["StreamK"] != 3:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires StreamK=3 (two-tile DP-first)")
+    return False
+
+  if state["StreamKAtomic"]:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction is not supported with StreamKAtomic")
+    return False
+
+  if state["StreamKForceDPOnly"]:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction is not supported with StreamKForceDPOnly")
+    return False
+
+  if state["StreamKFixupTreeReduction"]:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires StreamKFixupTreeReduction=0 "
+           "(linear partials/fixup, not tree)")
+    return False
+
+  if state["StreamKXCCMapping"] != 0:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires StreamKXCCMapping=0 "
+           "(WGM/XCC remap is bypassed under clustering)")
+    return False
+
+  clusterDim = state["ClusterDim"]
+  if not _validateStreamKClusterShape(clusterDim[0], clusterDim[1]):
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires Cs=ClusterDim[0] and "
+           "Ck=ClusterDim[1] each a power of two with C=Cs*Ck in [2, 16] "
+           "(got %s)" % clusterDim)
+    return False
+
+  isa = tuple(state["ISA"])
+  if isa != (12, 5, 0):
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires gfx1250 ISA (12, 5, 0)")
+    return False
+  if not isaInfoMap[isa].asmCaps.get("HasClusterBarrier", False):
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires asmCap HasClusterBarrier")
+    return False
+  if state["TDMInst"] == 0:
+    reject(state, printRejectionReason,
+           "StreamK cluster reduction requires TDMInst != 0")
     return False
 
   return True
@@ -1828,17 +1898,18 @@ class Solution(collections.abc.Mapping):
           reject(state, printRejectionReason,
                  "StreamK dynamic/hybrid (SK4/SK5) do not support ClusterDim "
                  "(cluster support is SK3-only)")
-        # A Y-extent > 1 means the Ck peers share A on N-adjacent tiles, which only
-        # works when the launch spans the real M x N tile space and the Y rank is
-        # folded back into a unique tile index (StreamK.preLoop). That is the
-        # ForceDPOnly cluster multicast; anywhere else a Y-extent > 1 would collide
-        # WorkGroup0 across work-groups that differ only in Y. A [1, Ck] cluster has
-        # no B-sharing X peers at all and is not a multicast shape.
-        if state["ClusterDim"][1] != 1 and not (streamK2DMulticast(state)
-                                                and state["StreamKForceDPOnly"]):
+        # A Y-extent > 1 is ClusterDim[1] = Ck. On ForceDPOnly=1 that is the
+        # N-adjacent A-multicast axis, which only works when the launch spans
+        # the real M x N tile space and both axes are > 1 (streamK2DMulticast).
+        # On ForceDPOnly=0 Ck is the SK-partial reduction axis ([1,C] pure
+        # reduction, or the Ck axis of Target A [Cs,Ck]); _validateStreamKClusterReduction
+        # owns that shape. A [1,Ck] cluster on ForceDPOnly=1 has no B-sharing
+        # X peers and is not a multicast shape.
+        if (state["ClusterDim"][1] != 1 and state["StreamKForceDPOnly"]
+            and not streamK2DMulticast(state)):
           reject(state, printRejectionReason,
-                 "Stream-K + ClusterDim Y-extent > 1 requires StreamKForceDPOnly=1 "
-                 "and a cluster [Cs, Ck] with both axes > 1; got %s"
+                 "Stream-K + ClusterDim Y-extent > 1 with StreamKForceDPOnly=1 "
+                 "requires a cluster [Cs, Ck] with both axes > 1; got %s"
                  % state["ClusterDim"])
         # StreamKXCCMapping remaps WorkGroup0 with no cluster awareness; disable it.
         state["StreamKXCCMapping"] = 0
@@ -1876,6 +1947,7 @@ class Solution(collections.abc.Mapping):
         reject(state, printRejectionReason, "Stream-K requires BufferStore")
       _validateStreamKForceDPOnly(state, printRejectionReason)
       _validateStreamKMulticast(state, printRejectionReason, isaInfoMap)
+      _validateStreamKClusterReduction(state, printRejectionReason, isaInfoMap)
       if state["StreamKAtomic"] == 1:
         if state["StreamK"] == 4:
           reject(state, printRejectionReason, "Atomic Stream-K is not supported with dynamic work queue mode")
