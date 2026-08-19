@@ -10,11 +10,7 @@ build-backend = "scikit_build_core.build"
 
 # NOTE: Building this package requires a ROCm install. The native Origami
 # library (liborigami + its CMake package) is first-class in ROCm, so a ROCm
-# install provides it. See:
-# https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
-# By default (ORIGAMI_BUILD_FROM_SOURCE=OFF) the extension is built against the
-# installed liborigami via find_package(origami). To build the native library
-# from the in-tree source instead, pass -DORIGAMI_BUILD_FROM_SOURCE=ON.
+# install provides it.
 
 [project]
 name = "rocm-origami"
@@ -40,20 +36,11 @@ torch = ["torch>=2.0.0"]
 wheel.packages = ["src/origami"]
 cmake.version = ">=3.25"
 build.verbose = true
-# CMake source directory - use current directory (python/) which contains CMakeLists.txt
-# By default python/CMakeLists.txt links against an installed origami
-# (find_package); it builds origami from the parent directory only when
-# ORIGAMI_BUILD_FROM_SOURCE=ON.
 cmake.source-dir = "."
-# CMake arguments
-# CMAKE_PREFIX_PATH and CMAKE_CXX_COMPILER should be set via environment variables
-# or passed via CMAKE_ARGS environment variable
 cmake.args = [
     "-DCMAKE_BUILD_TYPE:STRING=Release",
 ]
-# CMake defines - these can be overridden via environment
-# CMAKE_PREFIX_PATH will be used by python/CMakeLists.txt
-cmake.define = { ORIGAMI_BUILD_FROM_SOURCE = "OFF" }
+cmake.define = { }
 # Dynamic version from __init__.py
 metadata.version.provider = "scikit_build_core.metadata.regex"
 metadata.version.input = "src/origami/__init__.py"
@@ -72,6 +59,9 @@ wheel.exclude = [
     "*.md",
     "*.sh",
     "tests/*",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/liborigami.so*",
 ]
 
 [tool.pytest.ini_options]

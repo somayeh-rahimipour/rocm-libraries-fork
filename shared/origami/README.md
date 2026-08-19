@@ -29,11 +29,37 @@
 
 **ROCm/HIP**: This package requires a ROCm install. The native Origami library (`liborigami` and its CMake package) is first-class in ROCm, so a ROCm install provides it. See the [ROCm Quick Start Guide](https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html) for installation instructions.
 
-By default the Python extension is built against that installed `liborigami` (`find_package(origami)`), not from source. To build the native library from this source tree instead, pass `-DORIGAMI_BUILD_FROM_SOURCE=ON` (via `CMAKE_ARGS`).
+By default the Python extension links the installed shared `liborigami` (`find_package(origami)`) rather than building it from source. The build therefore needs a prefix that CMake can discover (via `CMAKE_PREFIX_PATH`) containing:
+
+```text
+lib/cmake/origami/origami-config.cmake
+lib/liborigami.so
+include/origami/...
+```
+
+A generic "ROCm is installed" is not sufficient if that prefix is not on `CMAKE_PREFIX_PATH`. To build the native library from this source tree instead, pass `-DORIGAMI_BUILD_FROM_SOURCE=ON` (via `CMAKE_ARGS`), which needs no pre-installed `liborigami`.
 
 ### Install
 
-Build against the installed native Origami (default):
+The canonical way to produce a distributable wheel is `python -m build --wheel`:
+
+```bash
+cd shared/origami/python
+python -m pip install build
+
+CMAKE_PREFIX_PATH=/path/to/rocm \
+  python -m build --wheel --outdir dist
+```
+
+Install the built artifact:
+
+```bash
+python -m pip install dist/*.whl
+```
+
+The wheel links the installed shared `liborigami`; that runtime must be visible to the dynamic loader at import time (via RPATH, `LD_LIBRARY_PATH`, or `ldconfig`).
+
+Alternatively, install directly from the repository in one step (builds a wheel under the hood):
 
 ```bash
 pip install git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python
@@ -178,6 +204,8 @@ Origami provides Python bindings that allow you to use Origami's functionality d
 
 #### Installation
 
+The build system uses `pyproject.toml` with scikit-build-core, which integrates with CMake for building the Python bindings. Building a wheel with `python -m build --wheel` (see [Install](#install)) is the canonical, distributable workflow. The workflows below are alternatives.
+
 Install directly from the rocm-libraries repository (this could take some time due to the size of the rocm-libraries repo):
 
 ```bash
@@ -195,18 +223,16 @@ pip install $TEMP_DIR/shared/origami/python -v
 rm -rf $TEMP_DIR
 ```
 
-If you have already cloned the repository:
+For development, an editable install rebuilds the extension in place from an already-cloned repository:
 
 ```bash
 cd shared/origami/python
 pip install -e .
 ```
 
-The build system uses `pyproject.toml` with scikit-build-core, which integrates with CMake for building the Python bindings.
+#### CMake Build (Legacy)
 
-#### CMake Build (Alternative)
-
-When building with CMake, you'll need to manually install the Python dependencies listed in `shared/origami/python/requirements.txt`:
+Building the Python bindings directly through the C++ CMake project is a legacy workflow, kept for callers that build the whole of Origami in one CMake tree. You'll need to manually install the Python dependencies listed in `shared/origami/python/requirements.txt`:
 
 ```bash
 pip install -r shared/origami/python/requirements.txt
