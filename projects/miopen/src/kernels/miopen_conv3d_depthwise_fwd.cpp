@@ -47,9 +47,13 @@ compile time constant:
     padding
     dilation
 */
+#ifndef MIOPEN_HIP_RUNTIME_COMPILE
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
+#else
+using __hip_bfloat16 = hip_bfloat16;
+#endif
 
 using u32 = unsigned int;
 using u16 = unsigned short;
