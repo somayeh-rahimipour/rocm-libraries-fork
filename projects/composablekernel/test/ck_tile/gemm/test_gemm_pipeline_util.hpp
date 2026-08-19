@@ -441,6 +441,14 @@ class TestCkTileGemmPipeline : public ::testing::Test
         {
             GTEST_SKIP() << "Unsupported data type combination for gemm pipeline test.";
         }
+        if constexpr(std::is_same_v<ADataType, ck_tile::pk_fp4_t> &&
+                     std::is_same_v<BDataType, ck_tile::pk_fp4_t>)
+        {
+            if(ck_tile::is_gfx125_supported() && ck_tile::get_device_revision() == 0)
+            {
+                GTEST_SKIP() << "WMMA F4 op not supported on gfx1250 asicRevision=0";
+            }
+        }
         // for TDM it used tdm_epilogue which don't support split-k
         if constexpr(PipelineType == GemmPipelineType::CompV4 ||
                      PipelineType == GemmPipelineType::CompAsyncEightWaves || IsAsync_v ||
