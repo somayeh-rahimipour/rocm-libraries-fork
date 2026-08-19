@@ -24,9 +24,7 @@ from typing import Optional, OrderedDict, Callable
 import sys
 import os 
 
-CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-
-sys.path.append(f"{CURR_DIR}/../")
+sys.path.append(f"../")
 
 from utils import TYPE_CONFIGS
 from tuner.base_tuner import BaseTuner, TunerArgs, COMMON_KEY_TYPES

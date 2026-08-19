@@ -32,7 +32,7 @@ import re
 import traceback
 from utils import Parser
 
-from tuner.base_tuner import TunerArgs
+from tuner.base_tuner import TunerArgs, BASE_DIR
 
 
 @contextmanager
@@ -92,8 +92,7 @@ def run_tuning(
     seed: int | None = None,
 ) -> None:
     """Run tuning for specified algorithms."""
-    current_dir = Path(__file__).parent
-    tuning_dir = current_dir / "tuner"
+    tuning_dir = Path(f'{BASE_DIR}/tuner')
 
     with working_directory(tuning_dir):
         for algo in algorithms:
