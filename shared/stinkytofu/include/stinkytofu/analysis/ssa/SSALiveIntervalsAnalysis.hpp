@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2025-2026 Advanced Micro Devices, Inc.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,30 +22,26 @@
  * ************************************************************************ */
 #pragma once
 
-#include "stinkytofu/analysis/BBIndexAnalysis.hpp"
-#include "stinkytofu/analysis/LoopAnalysis.hpp"
+#include "stinkytofu/Export.hpp"
 #include "stinkytofu/analysis/controlflow/DominanceAnalysis.hpp"
-#include "stinkytofu/analysis/ssa/SSALiveIntervalsAnalysis.hpp"
+#include "stinkytofu/analysis/ssa/SSALiveIntervals.hpp"
 #include "stinkytofu/core/AnalysisManager.hpp"
 
 namespace stinkytofu {
-/// Register all built-in analyses with an AnalysisManager.
-/// Call this once per PM at pipeline setup time.
-inline void registerAllAnalyses(AnalysisManager& AM) {
-    AM.registerPass<BBIndexAnalysis>();
-    AM.registerPass<DominanceAnalysis>();
-    AM.registerPass<LoopAnalysis>();
-    AM.registerPass<SSALiveIntervalsAnalysis>();
-}
+/// Analysis pass that computes live intervals over attached SSA values.
+/// Wraps computeSSALiveIntervals(), reusing the cached dominance order.
+///
+/// Deliberately absent from preserveCFGAnalyses(): a pass that reorders
+/// instructions or rewrites operands invalidates these intervals even when the
+/// CFG is untouched.
+struct SSALiveIntervalsAnalysis {
+    STINKYTOFU_ANALYSIS_KEY("SSALiveIntervalsAnalysis")
 
-/// Convenience: build a PreservedAnalyses that keeps CFG analyses.
-/// Use when a pass reorders instructions but does not add/remove BBs or edges.
-inline PreservedAnalyses preserveCFGAnalyses() {
-    PreservedAnalyses PA;
-    PA.preserve<BBIndexAnalysis>();
-    PA.preserve<DominanceAnalysis>();
-    PA.preserve<LoopAnalysis>();
-    return PA;
-}
+    using Result = SSALiveIntervals;
+
+    static Result run(Function& F, AnalysisManager& AM) {
+        return computeSSALiveIntervals(F, AM.getResult<DominanceAnalysis>(F));
+    }
+};
 
 }  // namespace stinkytofu

@@ -66,6 +66,7 @@ set(UNIT_ASM_TEST_FILES
     unit/asm/LegalizationUtilsTest.cpp
     unit/asm/VirtualRegisterTest.cpp
     unit/ssa/AttachedSSATest.cpp
+    unit/ssa/SSALiveIntervalsTest.cpp
     unit/ssa/AsmPrinterSSAFormTest.cpp
     unit/ssa/LiftAsmRegistersToSSATest.cpp
     unit/asm/DefUseAnalysisCleanupTest.cpp

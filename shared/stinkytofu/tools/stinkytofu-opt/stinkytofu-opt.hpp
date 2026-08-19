@@ -160,7 +160,9 @@ const std::vector<PassInfo> availablePasses = {
     {"ReplayLegacyColoringPass", [](const auto&) { return createReplayLegacyColoringPass(); }},
     // DumpStinkyModulePass accepts:
     //   ssaForm  — print attached SSA values instead of physical registers
-    //   stdout   — print to stdout instead of dump_module.stir
+    //   ssaLive  — also dump SSA live ranges and peak pressure
+    //   stdout   — print to stdout instead of dump_module.stir /
+    //              ssa_live_intervals.txt
     {"DumpStinkyModulePass",
      [](const std::vector<std::string>& args) {
          const bool toStdout = hasPassArg(args, "stdout");
@@ -168,6 +170,8 @@ const std::vector<PassInfo> availablePasses = {
          config.stirPath = toStdout ? std::string{} : "dump_module.stir";
          config.stirToStdout = toStdout;
          config.printerOptions.ssaForm = hasPassArg(args, "ssaForm");
+         if (hasPassArg(args, "ssaLive"))
+             config.ssaLiveOut = toStdout ? "-" : "ssa_live_intervals.txt";
          return createDumpStinkyModulePass(std::move(config));
      }},
     {"DumpMemTokenIRStructurePass",

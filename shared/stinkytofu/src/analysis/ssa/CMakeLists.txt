@@ -3,4 +3,6 @@
 
 target_sources(stinkytofu_objs PRIVATE
     SSAAllocation.cpp
+    SSASlotIndexes.cpp
+    SSALiveIntervals.cpp
 )

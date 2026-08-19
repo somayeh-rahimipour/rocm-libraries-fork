@@ -21,6 +21,7 @@
 - [Pattern Grammar Reference](developer/pattern-grammar.md) -- Complete syntax for the pattern language
 - [SSA representation](developer/ssa-representation.md) -- SSA value/use-list model on Function, BasicBlock, and StinkyInstruction
 - [Lift Asm Registers to SSA Pass](developer/lift-asm-registers-to-ssa-pass.md) -- Physical VGPR/SGPR lift to attached SSA on Function
+- [Register Allocation](developer/register-allocation.md) -- Allocator interface, live intervals, and verification on attached SSA
 
 ## [Known Issues](known-issues.md)
 
