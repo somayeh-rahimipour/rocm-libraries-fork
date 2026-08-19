@@ -49,9 +49,19 @@ nanobind_add_module(_pyorigami "${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings.cpp")
 
 set_target_properties(_pyorigami PROPERTIES OUTPUT_NAME "origami")
 
-# Place the compiled module in the source package directory for development/testing
+# Stage an importable package in the build tree for development/testing
 set_target_properties(_pyorigami PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/origami"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/origami"
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/origami/__init__.py"
+    "${CMAKE_CURRENT_BINARY_DIR}/origami/__init__.py"
+    COPYONLY
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/origami/selector.py"
+    "${CMAKE_CURRENT_BINARY_DIR}/origami/selector.py"
+    COPYONLY
 )
 
 # Link against origami library and HIP
@@ -112,7 +122,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_origami_bindings"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
     )
 
@@ -127,7 +137,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_selector"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
             SKIP_RETURN_CODE 5  # Allow skipping tests without emitting an error
     )
@@ -143,7 +153,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_attention_bindings"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
     )
 
@@ -158,7 +168,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_attention_selector"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
             SKIP_RETURN_CODE 5  # Allow skipping tests without emitting an error
     )
@@ -174,7 +184,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_hardware"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
     )
 
@@ -189,7 +199,7 @@ if(ORIGAMI_BUILD_TESTING OR BUILD_TESTING)
         "Python: test_ranking_regression"
         PROPERTIES
             ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/src:$ENV{PYTHONPATH}"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PYTHONPATH}"
             DEPENDS _pyorigami
     )
 
