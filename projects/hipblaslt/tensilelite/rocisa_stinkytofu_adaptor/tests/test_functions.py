@@ -50,8 +50,7 @@ from rocisa_stinkytofu_adaptor.functions import ArgumentLoader  # noqa: E402
 # ---------------------------------------------------------------------------
 
 FUNCTIONS_DUMMY_EXPORTS: tuple[str, ...] = (
-    # DS init
-    "DSInit",
+    # (none) -- DSInit is now a real implementation; see TestDSInit below.
 )
 
 
@@ -329,6 +328,8 @@ class TestFunctionsModuleExports(unittest.TestCase):
             "VSaturateCastInt",
             "SMovkI32", "VMed3I32", "VMinI32", "VMaxI32",
             "SaturateCastType",
+            # Real DSInit + the instruction/modifier symbols it imports
+            "DSInit", "DSStoreB32", "SBarrier", "SWaitCnt", "DSModifiers",
         })
         module_dummies = {
             name for name in dir(_functions)
@@ -347,6 +348,48 @@ class TestFunctionsDummyCallables(unittest.TestCase):
                 self.assertTrue(callable(fn))
                 with mock.patch("builtins.print"):
                     self.assertIsNone(fn())
+
+
+class TestDSInit(unittest.TestCase):
+    """DSInit mirrors rocisa::DSInit (functions/functions.cpp:37-68).
+
+    Fixed prologue/epilogue of 6 instructions (SWaitCnt, SBarrier, VMovB32,
+    VLShiftLeftB32, ... , SWaitCnt, SBarrier) wrapping ``writesPerThread``
+    DSStoreB32 loop iterations.
+    """
+
+    @staticmethod
+    def _tmp(size=2, idx=0):
+        from rocisa_stinkytofu_adaptor.container import ContinuousRegister
+        return ContinuousRegister(idx=idx, size=size)
+
+    def test_rejects_single_lane_scratch(self):
+        with self.assertRaises(ValueError):
+            _functions.DSInit(self._tmp(size=1), 256, 256, 0)
+
+    def test_single_write_shape(self):
+        # numThreads=256, ldsNumElements=256 -> writesPerThread=1 -> 7 items.
+        m = _functions.DSInit(self._tmp(), 256, 256, 0)
+        self.assertIsInstance(m, Module)
+        self.assertEqual(countInstruction(m), 7)
+        self.assertEqual(countLocalWrite(m), 1)
+
+    def test_multi_write_count_matches_formula(self):
+        # writesPerThread = ((ldsNumElements-1)//numThreads//4)+1
+        numThreads, lds = 256, 4096
+        expected = ((lds - 1) // numThreads // 4) + 1
+        m = _functions.DSInit(self._tmp(), numThreads, lds, 0)
+        self.assertEqual(countLocalWrite(m), expected)
+        self.assertEqual(countInstruction(m), 6 + expected)
+
+    def test_ds_store_offsets_are_strided(self):
+        from rocisa_stinkytofu_adaptor.instruction import DSStoreB32
+        numThreads, lds = 256, 4096
+        m = _functions.DSInit(self._tmp(), numThreads, lds, 0)
+        offsets = [it.ds.offset for it in m.itemList
+                   if isinstance(it, DSStoreB32)]
+        self.assertEqual(offsets,
+                         [i * numThreads * 4 for i in range(len(offsets))])
 
 
 # ==========================================================================

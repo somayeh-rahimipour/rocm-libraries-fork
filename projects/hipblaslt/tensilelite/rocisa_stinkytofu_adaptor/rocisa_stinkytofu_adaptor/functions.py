@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Composite KernelWriter helpers (ArgumentLoader, math, branch).
 
-Real: ArgumentLoader, vector/scalar divide, magic division, branch helpers.
-Not yet done: VSaturateCastInt, DSInit.
+Real: ArgumentLoader, vector/scalar divide, magic division, branch helpers, DSInit.
+Not yet done: VSaturateCastInt.
 """
 
 from __future__ import annotations
@@ -11,16 +11,16 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ._dummy import make_dummy_func
 from .code import Module, TextBlock
-from .container import ContinuousRegister, EXEC, VCC, sgpr, vgpr
+from .container import ContinuousRegister, DSModifiers, EXEC, VCC, sgpr, vgpr
 from .enum import DataTypeEnum
 from .instruction import (
-    SAddCU32, SAddU32, SAndB32, SAndB64, SCBranchSCC0, SCBranchSCC1,
+    DSStoreB32,
+    SAddCU32, SAddU32, SAndB32, SAndB64, SBarrier, SCBranchSCC0, SCBranchSCC1,
     SCBranchVCCNZ, SCBranchVCCZ, SCmpEQU32, SCmpEQU64, SCmpLgU32,
     SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLShiftRightB64,
     SLoadB32, SLoadB64, SLoadB128, SLoadB256, SLoadB512,
-    SMulHIU32, SMulI32, SMovB32, SMovB64, SNop, SSubU32,
+    SMulHIU32, SMulI32, SMovB32, SMovB64, SNop, SSubU32, SWaitCnt,
     VAddCCOU32, VAddLShiftLeftU32, VAddU32, VAndB32, VCmpEQF32,
     VCmpEQF64, VCmpNeU32, VCmpXEqU32, VCmpXGeU32, VCmpXGtU32,
     VCvtF32toU32, VCvtF64toU32, VCvtU32toF32, VCvtU32toF64,
@@ -1190,4 +1190,33 @@ def scalarMultiply64Bpe(dst, src, bpe, tmp, comment=""):
     return module
 
 
-DSInit = make_dummy_func(f"{_P}.DSInit")
+def DSInit(tmpVgprRes: Any, numThreads: int, ldsNumElements: int,
+           initValue: int) -> Module:
+    """Mirror of ``rocisa::DSInit`` (functions/functions.cpp:37-68).
+
+    Zero/const-fills LDS in a debug build; KernelWriterAssembly gates the
+    call behind ``db["InitLds"]``. ``tmpVgprRes`` is a ``ContinuousRegister``
+    of size > 1: its first lane holds the init value, the second the
+    per-thread LDS address.
+    """
+    if tmpVgprRes.size <= 1:
+        raise ValueError("tmpVgprRes.size must be greater than 1")
+    tmp = tmpVgprRes.idx
+    tmpAddr = tmp + 1
+
+    module = Module("initLds")
+    module.add(SWaitCnt(0, 0, 0, 0, comment="init lds state"))
+    module.add(SBarrier(comment="init LDS"))
+    module.add(VMovB32(vgpr(tmp), initValue, comment="Init value"))
+    module.add(VLShiftLeftB32(vgpr(tmpAddr), 2, vgpr("Serial"),
+                              comment="set per-thread address to init LDS"))
+
+    writesPerThread = ((ldsNumElements - 1) // numThreads // 4) + 1
+    for i in range(writesPerThread):
+        module.add(DSStoreB32(dstAddr=vgpr(tmpAddr), src=vgpr(tmp),
+                              ds=DSModifiers(offset=i * numThreads * 4),
+                              comment="init lds"))
+
+    module.add(SWaitCnt(0, 0, 0, 0, comment="wait for LDS init to complete"))
+    module.add(SBarrier(comment="init LDS exit"))
+    return module
