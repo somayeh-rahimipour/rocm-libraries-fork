@@ -47,12 +47,16 @@ compile time constant:
     padding
     dilation
 */
+// Under HIPRTC (MIOPEN_HIP_RUNTIME_COMPILE) these headers are unavailable and
+// their contents (including __half and __hip_bfloat16) are already provided by
+// the runtime-compile preamble, so skip them to avoid a "file not found" error
+// (ALMIOPEN-2206). Do not alias __hip_bfloat16: it is already defined as a
+// distinct built-in type under HIPRTC, and re-aliasing it triggers a typedef
+// redefinition error.
 #ifndef MIOPEN_HIP_RUNTIME_COMPILE
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
-#else
-using __hip_bfloat16 = hip_bfloat16;
 #endif
 
 using u32 = unsigned int;
