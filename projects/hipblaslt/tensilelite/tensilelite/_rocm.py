@@ -19,9 +19,8 @@ from pathlib import Path
 # Diagnostic source label for an active Python rocm-sdk-core installation.
 _PYTHON_SDK_SOURCE = "active Python rocm_sdk_core"
 
-# Temporary compatibility gates. Keep the implementation below intact so the
-# version and Python-SDK paths can be re-enabled once TheRock provides them.
-_ENABLE_ROCM_VERSION_VALIDATION = False
+# Temporary compatibility gate. Keep the Python-SDK implementation below intact
+# until TheRock provides the required SDK client/tool payload.
 _ENABLE_PYTHON_ROCM_RUNTIME = False
 
 class TensileLiteRuntimeError(ImportError):
@@ -61,11 +60,7 @@ def validate_distribution(
     distribution: str, distribution_version: str | None = None
 ) -> ValidatedRocm:
     """Select and validate the ROCm installation for a TensileLite wheel."""
-    expected = (
-        _expected_rocm_version(distribution, distribution_version)
-        if _ENABLE_ROCM_VERSION_VALIDATION
-        else "BYPASS"
-    )
+    expected = _expected_rocm_version(distribution, distribution_version)
     if _ENABLE_PYTHON_ROCM_RUNTIME:
         python_sdk_version = _python_sdk_version()
         if python_sdk_version is not None:
