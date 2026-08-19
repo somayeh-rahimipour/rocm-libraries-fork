@@ -86,6 +86,7 @@ function(hipblaslt_create_device_library)
     if(_cdl_LOGIC_FILTER)
         list(APPEND _logic_opts "--logic-filter=**/${_cdl_LOGIC_FILTER}.yaml")
     endif()
+
     set(_logic_stamp "${CMAKE_CURRENT_BINARY_DIR}/${_cdl_TARGET}-TensileLogic.stamp")
     add_custom_command(
         OUTPUT "${_logic_stamp}"
