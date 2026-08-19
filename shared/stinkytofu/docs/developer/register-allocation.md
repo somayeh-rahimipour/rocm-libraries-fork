@@ -18,7 +18,7 @@ Take a function that already has attached SSA and produce an `AllocationResult`:
 No allocator touches those fields, calls `setPhysicalBinding`, or rewrites use-lists.
 A failed allocation leaves the function exactly as the lifter left it, the same contract as a rejected lift.
 
-First target is gfx1250, VGPR then SGPR, no spilling.
+The first policy colours VGPRs then SGPRs and never spills.
 A function the allocator cannot colour keeps TensileLite's original registers.
 TensileLite keeps producing physical numbering; those numbers are variable names and `PhysicalBinding` hints, not the final assignment.
 
@@ -36,7 +36,7 @@ TensileLite keeps producing physical numbering; those numbers are variable names
 | `ReplayLegacyColoringPass` | `destroyAttachedSSA(f, createLegacyColoring(f))` | shipped |
 | `StinkyUnreachableBlockElimPass` | erase CFG-unreachable blocks **before** lift | shipped |
 | `SSASlotIndexes` / `SSALiveIntervals` | program points and live ranges over SSA values | shipped |
-| `AsmTargetRegisters` / `PhysRegMatrix` | allocatable units and their occupancy | to build |
+| `AsmTargetRegisters` / `PhysRegMatrix` | allocatable units and their occupancy | shipped |
 | `AllocationConstraints` | tuple runs, merge affinity, hints | to build |
 | `RegisterAllocator` / `AllocatorRegistry` / `RegisterAllocationPass` | the policy seam and its driver | to build |
 | `AllocationVerifier` | legality of any colouring | to build |
@@ -49,15 +49,16 @@ That gate is about the lift machinery, not about allocation.
 The colouring policy is one replaceable object.
 Everything else is written once and shared, so a later linear-scan, occupancy-driven, or graph-colouring allocator is a new class plus a registration line.
 
+The flow, with both places a colouring can be refused:
+
 ```mermaid
 flowchart TD
     subgraph shared [Shared, policy-independent]
+        Slots["SSASlotIndexes"]
         Intervals["SSALiveIntervals"]
         Target["AsmTargetRegisters"]
         Constraints["AllocationConstraints"]
         Matrix["PhysRegMatrix (utility)"]
-        Verifier["AllocationVerifier"]
-        Destroy["destroyAttachedSSA"]
     end
 
     subgraph policy [Swappable policy]
@@ -66,18 +67,116 @@ flowchart TD
         Future["future policies"]
     end
 
+    Slots --> Intervals
     Intervals --> Ctx["AllocationContext"]
     Target --> Ctx
     Constraints --> Ctx
-    Ctx --> Iface["RegisterAllocator::allocate"]
+
+    Pass["RegisterAllocationPass"] --> Gate{"lowering supports capabilities?"}
+    Gate -->|no| Refuse["refuse: operands and attached SSA untouched"]
+    Gate -->|yes| Iface["RegisterAllocator::allocate"]
+    Ctx --> Iface
     Greedy --> Iface
     Legacy --> Iface
     Future --> Iface
     Matrix -.->|"used by"| Iface
     Iface --> Result["AllocationResult"]
-    Result --> Verifier
-    Verifier --> Destroy
+    Result --> Verify{"AllocationVerifier"}
+    Verify -->|fail| Refuse
+    Verify -->|ok| Destroy["destroyAttachedSSA rewrites operands"]
 ```
+
+How the types relate. Solid diamonds are ownership, dashed arrows are references:
+
+```mermaid
+classDiagram
+    direction LR
+
+    class AsmTargetRegisters {
+        allocatableClasses()
+        indexCount(class)
+        isAllocatable(class, idx)
+        allocationGranule(class)
+        totalPerSimd(class)
+        reserve(class, first, count)
+    }
+    class SSASlotIndexes {
+        blockStart(block)
+        blockArgDef(block)
+        useSlot(instruction)
+        defSlot(instruction)
+    }
+    class LiveRange {
+        segments : sorted and half-open
+        length()
+        overlaps(other)
+    }
+    class SSALiveIntervals {
+        rangeOf(valueId)
+        overlap(a, b)
+        peakPressure(class)
+    }
+    class AllocationConstraints {
+        classOf(valueId)
+        hintFor(valueId)
+        tupleRuns()
+        affinitySets()
+    }
+    class AllocationContext {
+        function
+        intervals
+        target
+        constraints
+        loops
+    }
+    class AllocatorCapabilities {
+        mayRecolourMerges
+        maySpill
+    }
+    class RegisterAllocator {
+        <<interface>>
+        name()
+        capabilities()
+        allocate(context)
+    }
+    class GreedyAllocator
+    class LegacyIdentityAllocator
+    class PhysRegMatrix {
+        available(class, idx, range)
+        collectConflicts(class, idx, range)
+        findFreeRun(class, width, range)
+        bind(class, idx, value, range)
+        unbind(class, idx, value)
+    }
+    class AllocationResult {
+        assign(valueId, physical)
+        assignmentOf(valueId)
+        shape()
+    }
+    class RegisterAllocationPass
+
+    SSALiveIntervals "1" *-- "0..n" LiveRange
+    SSALiveIntervals "1" *-- "1" SSASlotIndexes
+
+    AllocationContext ..> SSALiveIntervals
+    AllocationContext ..> AsmTargetRegisters
+    AllocationContext ..> AllocationConstraints
+
+    RegisterAllocator <|-- GreedyAllocator
+    RegisterAllocator <|-- LegacyIdentityAllocator
+    RegisterAllocator ..> AllocatorCapabilities : declares
+    RegisterAllocator ..> AllocationContext : reads only
+    RegisterAllocator ..> AllocationResult : produces
+
+    GreedyAllocator ..> PhysRegMatrix : uses
+    PhysRegMatrix ..> AsmTargetRegisters : asks what is allocatable
+    PhysRegMatrix ..> LiveRange : references, does not own
+
+    RegisterAllocationPass ..> RegisterAllocator : selects by name
+    RegisterAllocationPass ..> AllocationResult : verifies, then applies
+```
+
+Two shapes carry the design. `AllocationContext` reaches only the shared side, so a policy cannot see the IR it must not mutate; and `LegacyIdentityAllocator` sits behind the same interface as `GreedyAllocator`, which is what makes the seam testable before a real policy exists.
 
 ### 3.1. The interface
 
@@ -179,7 +278,7 @@ Vocabulary, for a reader arriving from LLVM. Section 2 has the build state.
 | virtreg | `StinkySSAValue` (`valueId()`) |
 | `SlotIndex` | `SSASlotIndexes` |
 | `LiveInterval` | `SSALiveIntervals`, keyed by `valueId` |
-| `LiveRegMatrix` | `PhysRegMatrix`, occupancy of `(RegType, idx)` by an interval |
+| `LiveRegMatrix` | `PhysRegMatrix` |
 | `TargetRegisterInfo` | `AsmTargetRegisters` |
 | `VirtRegMap` | `AllocationResult` |
 | copy / preferred physreg | `PhysicalBinding` |
@@ -343,26 +442,52 @@ Point queries, per-block peaks, and precoloured versus freely allocatable pressu
 
 ### 6.4. Physreg matrix
 
-For each allocatable unit `(RegType, idx)`, record which interval currently occupies it.
-Interference is `matrix.overlaps(type, idx, interval)`, not a pair of values.
+`PhysRegMatrix` in `transforms/ra/PhysRegMatrix.hpp` records which live ranges occupy each allocatable unit `(RegType, idx)`.
+This is where interference is answered, so no interference graph is built:
 
-A 2-DWORD operand queries two consecutive units.
-Reserved and ABI-fixed indices are holes: they never become candidates.
+- `available(class, idx, range)` — the unit is allocatable and nothing bound there is live where `range` is
+- `collectConflicts(class, idx, range, out)` — *who* the conflict is with, which is what an evicting policy needs
+- `bind` / `unbind` — `unbind` is silent when the value does not hold the unit, so undoing a partly applied tuple needs no bookkeeping
+- `runAvailable(class, base, width, range)` and `findFreeRun(class, width, range)` — the consecutive-unit queries a multi-DWORD operand needs, refusing a run that would leave the class
+- `highestBound(class)` — the width a resource descriptor cares about, which is not the peak pressure
 
-EXEC, VCC, SCC, M0, literals, and memtokens are not values and do not occupy VGPR/SGPR units.
-VCC and EXEC are their own `RegType` in this IR, so SGPR colouring cannot alias them by index.
+Ranges are referenced rather than copied, since `SSALiveIntervals` owns them.
+`bind` therefore deletes its rvalue overload: passing a temporary is a compile error instead of a dangling pointer.
 
-The matrix is a utility rather than part of the allocator interface: a linear-scan or graph-colouring policy may want a different occupancy structure.
+Only classes the target calls allocatable have storage.
+EXEC, VCC, SCC, M0, literals, and memtokens are not values and never occupy a unit; VCC and EXEC are their own `RegType` in this IR, so colouring SGPRs cannot alias them by index.
+
+The matrix is a utility rather than part of the allocator interface: a linear-scan or graph-colouring policy may want a different occupancy structure and should not pay for this one.
 
 ### 6.5. Target registers
 
-`AsmTargetRegisters` is deliberately small for v1, gfx1250 only:
+`AsmTargetRegisters` in `hardware/AsmTargetRegisters.hpp` answers which registers may be handed out.
+It sits with `ArchHelper` rather than under `analysis/`, because it derives nothing from the IR: it is architecture description.
+`forArch()` or `forFunction()` builds one; `isAllocatable(class, idx)` is the single question the matrix asks.
 
-- VGPR and SGPR counts and allocation granules
-- reserved / ABI-fixed ranges
-- allocatable classes matching lift (`RegType::V` and `RegType::S`)
+Allocatable classes are exactly the lifted ones, delegating to `isLiftableRegClass()` so a class the lifter ignores can never be coloured.
+`allocatableClasses()` enumerates that set once, so a consumer cannot restate a shorter list and silently skip a class the target allows.
 
-Alignment, AGPR aliasing, VGPR-MSB, occupancy tiers, and call clobbers stay out until a colouring is legal without them.
+Every limit is the architecture's own, declared in its `DEF_ARCH` block in `hardware/src/gfx/<Arch>/<Arch>Formats.def` and reached through `ArchHelper`:
+
+```text
+.maxVGPR, .maxSGPR, .maxAGPR      indexes an operand can encode
+.totalVgprPerSimd                 physical register file
+.vgprAllocGranule                 step occupancy is measured in
+```
+
+Nothing here is keyed on an architecture, so supporting a target means editing that target's `.def` and nothing else.
+Tablegen already parsed those fields; they now also reach `ArchHelper::ArchInfo`, exposed as scalars rather than a `RegType` lookup so `hardware/` stays free of the asm IR types.
+
+`indexCount()` and `totalPerSimd()` are different numbers and the difference matters.
+`indexCount()` is `maxVGPR`, what an operand can encode; `totalPerSimd()` is the physical file, which can be several times larger.
+Reaching the rest of that file needs the high-register encoding, which is not modelled, so a kernel whose pressure exceeds the addressable range has no colouring here and falls back to legacy.
+That is not hypothetical: measured peaks in the corpus run well past the addressable range.
+
+No reserved range is built in, and `reservedRanges()` starts empty.
+Which registers the late passes and each ABI mode reserve is still open, so a caller that knows calls `reserve(class, first, count)` instead of reading a guess.
+
+Alignment, accumulator aliasing, the high-register encoding, occupancy tiers, and call clobbers stay out until a colouring is legal without them.
 
 ## 7. Constraints the colourer reads
 
