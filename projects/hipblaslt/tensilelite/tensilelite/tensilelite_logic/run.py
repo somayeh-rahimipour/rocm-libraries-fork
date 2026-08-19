@@ -35,16 +35,13 @@ import warnings
 from pathlib import Path
 from typing import FrozenSet, List, Dict, NamedTuple, Tuple
 
-from tensilelite.Common.GlobalParameters import assignGlobalParameters, defaultSolution
-from tensilelite.CustomYamlLoader import load_logic_gfx_arch, archMatch
-
-from .parse_arguments import parseArguments, BUNDLED_KNOWN_BUGS
+from .parse_arguments import BUNDLED_KNOWN_BUGS, parseArguments
 from .known_bugs import (
     KnownBugKey,
     is_known_bug,
+    load_bundled_known_bugs,
     load_known_bugs,
     normalize_logic_relative_path,
-    load_bundled_known_bugs,
 )
 from .valid_chip_id import _validateChipId
 from .valid_matrix_instruction import _validateMatrixInstruction
@@ -52,55 +49,13 @@ from .valid_work_group import _validateWorkGroup
 from .valid_work_group_mapping_xcc import _validateWorkGroupMappingXCC, reset_reported_failures
 from .handle_custom_kernel import handleCustomKernel, hasCustomKernel
 
-
 from tensilelite.Common import ParallelMap2, print1, print2, IsaVersion, IsaInfo, setVerbosity
 from tensilelite.Common.Architectures import SUPPORTED_ISA
 from tensilelite.Common.Capabilities import makeIsaInfoMap
+from tensilelite.Common.GlobalParameters import assignGlobalParameters, defaultSolution
+from tensilelite.CustomYamlLoader import load_logic_gfx_arch, archMatch
 from tensilelite.LibraryIO import readYAML
 from tensilelite.Toolchain.Validators import validateToolchain
-
-################################################################################
-#
-# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-#
-################################################################################
-################################################################################
-#
-# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-#
-################################################################################
 ################################################################################
 #
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
@@ -253,7 +208,7 @@ def _runChecks(
 
 
 def _setup(argv=None):
-    args = parseArguments() if argv is None else parseArguments(argv)
+    args = parseArguments(argv)
 
     setVerbosity(args.Verbose)
     jobs = int(args.Jobs)
@@ -330,7 +285,7 @@ def main(argv=None):
         )
     except (ValueError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
-        raise SystemExit(1)
+        exit(1)
 
     # Use more, smaller batches for better load balancing (workers stay busy as tasks complete)
     num_batches_target = min(len(files), jobs * 8)

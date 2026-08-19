@@ -102,7 +102,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["_tensilelite_client_binding", "tensilelite_configure_client"]
-
 [tool.setuptools.packages.find]
 include = ["tensilelite*"]
 exclude = ["tensilelite.Tests*", "tensilelite.Utilities.archive*"]

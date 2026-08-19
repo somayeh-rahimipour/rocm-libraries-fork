@@ -6,7 +6,7 @@
 Characterisation test -- branch_id 3a433f9e15d67650bc2250f006f451f96af7633f
 
 Predicate : kernel["HalfPLRA"]   (bare truthiness on dict value)
-Site      : Tensile/KernelWriter.py:4072  (inside _loopBody)
+Site      : tensilelite/KernelWriter.py:4072  (inside _loopBody)
 Solver    : z3 -- SAT  (sat-bounded; HalfPLR seeded domain {0,1,2,3})
 Classification: fully-static
 
