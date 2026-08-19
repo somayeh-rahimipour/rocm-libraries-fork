@@ -22,8 +22,11 @@
 
 from typing import Optional, OrderedDict, Callable
 import sys
+import os 
 
-sys.path.append("../")
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.append(f"{CURR_DIR}/../")
 
 from utils import TYPE_CONFIGS
 from tuner.base_tuner import BaseTuner, TunerArgs, COMMON_KEY_TYPES
@@ -52,7 +55,7 @@ class Tuner(BaseTuner):
     def _get_tune_params(self) -> OrderedDict:
         params = OrderedDict()
         params['block_size_x'] = list(range(MIN_BLOCK_SIZE_X, MAX_BLOCK_SIZE_X + 1, BLOCK_SIZE_INC))
-        params['items_per_thread'] = STARTING_IPT + list(range(MIN_IPT, MAX_IPT + 1, IPT_INC))
+        params['ipt'] = STARTING_IPT + list(range(MIN_IPT, MAX_IPT + 1, IPT_INC))
         return params
 
     def _get_restrictions(
@@ -66,7 +69,7 @@ class Tuner(BaseTuner):
 
         def validate(params):
             block_size = params["block_size_x"]
-            items_per_thread = params["items_per_thread"]
+            items_per_thread = params["ipt"]
 
             # Total size constraint
             if block_size * items_per_thread > size:
