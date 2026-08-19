@@ -69,7 +69,10 @@ Notes:
 
 from __future__ import annotations
 
+import atexit
+import base64
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -96,64 +99,196 @@ except ImportError:
     _STINKY_OK = False
 
 
+# ---------------------------------------------------------------------------
+# Assembler probe (paths 1 & 2 only)
+# ---------------------------------------------------------------------------
+#
+# The native rocisa ``rocIsa.init(arch, assemblerPath, debug)`` call computes
+# gfx caps by *actually running* the assembler (``tryAssembler`` in
+# ``rocisa/include/hardware_caps.hpp``). It execs ``assemblerPath`` directly
+# and does NOT search ``PATH``; an empty string yields
+# ``RuntimeError: Assembler not found or not executable:``. Paths 1 and 2 go
+# through native ``init``, so they need a real ``amdclang++`` path injected
+# into the preamble. Path 3 (the stinkytofu adapter) ignores it and probes
+# caps via comgr instead, so it does not need this.
+#
+# Discovery order: explicit ``ROCISA_TEST_ASSEMBLER`` override, else the
+# ``amdclang++`` found on ``PATH`` (which ``test.sh`` prepends the ROCm bin
+# dir to). Recorded once here and reused by every emitter.
+
+_ASM_PATH = os.environ.get("ROCISA_TEST_ASSEMBLER") or shutil.which("amdclang++") or ""
+_ASM_OK = bool(_ASM_PATH) and os.access(_ASM_PATH, os.X_OK)
+
+# Emission consistency needs BOTH the stinkytofu binding and a native
+# assembler, because every three-path test compares a native (path 1 / 2)
+# emit against the adapter (path 3).
+_EMISSION_OK = _STINKY_OK and _ASM_OK
+
+
+def _emission_skip_reason() -> str:
+    """Human-readable list of what is missing, for the skip message."""
+    missing = []
+    if not _STINKY_OK:
+        missing.append(
+            "stinkytofu binding not importable "
+            "(check PYTHONPATH and LD_LIBRARY_PATH -> libamd_comgr.so.3)"
+        )
+    if not _ASM_OK:
+        missing.append(
+            "amdclang++ assembler not found "
+            "(set ROCISA_TEST_ASSEMBLER, or add the ROCm bin dir to PATH)"
+        )
+    return "emission consistency skipped: " + "; ".join(missing)
+
+
+_EMISSION_SKIP_REASON = _emission_skip_reason()
+
+# Emit a one-time warning at import so a skipped run tells the user exactly
+# which piece of the environment is absent (instead of silently skipping).
+if not _EMISSION_OK:
+    sys.stderr.write("[test_emission_consistency] " + _EMISSION_SKIP_REASON + "\n")
+
+
 # ===========================================================================
-# Subprocess runner
+# Persistent per-backend worker pool
 # ===========================================================================
+#
+# A three-path test needs a *fresh* interpreter per backend only because
+# ``ROCISA_BACKEND`` is read once at ``import rocisa`` time -- it cannot be
+# switched within a live process. Spawning one subprocess *per test method*,
+# though, re-pays the native caps probe (``rocIsa.init`` actually runs
+# ``amdclang++``, ~3.5s) on every call, because the C++ caps cache lives in
+# process memory only.
+#
+# Instead we keep ONE long-lived worker process per backend. It pays the
+# 3.5s init just once (the first request; identical-arch reinit hits the C++
+# cache), then serves every later emit from the same interpreter -- turning
+# ~350 native inits into ~2 and a full emission run from ~20 min into well
+# under a minute.
+#
+# Protocol (one request/response per line; base64 so scripts and asm payloads
+# may contain newlines): parent writes ``<b64(script)>\n``; the worker execs
+# the script in a fresh namespace and replies ``OK <b64(_payload)>\n`` or
+# ``ERR <b64(traceback)>\n``. A bare ``__QUIT__`` line shuts it down.
+
+_WORKER_SRC = r'''
+import sys, os, base64, traceback
+
+# rocisa / stinkytofu print banners to *fd 1* (C++-level stdout) during import
+# and init. If those landed on our protocol channel they would corrupt the
+# reply stream, so reserve the real stdout as the protocol pipe and point
+# fd 1 at /dev/null. Emit results are read back from the ``_payload`` variable
+# in the exec namespace, never from stdout, so nothing useful is lost.
+_proto = os.fdopen(os.dup(1), "w", buffering=1)
+os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+
+def _serve():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line == "__QUIT__":
+            return
+        try:
+            script = base64.b64decode(line).decode("utf-8")
+            ns = {}
+            exec(compile(script, "<emit>", "exec"), ns)
+            payload = ns["_payload"]
+            reply = "OK " + base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        except BaseException:
+            tb = traceback.format_exc()
+            reply = "ERR " + base64.b64encode(tb.encode("utf-8")).decode("ascii")
+        _proto.write(reply + "\n")
+        _proto.flush()
+
+_serve()
+'''
 
 
-# Sentinels framing the asm payload in each subprocess's stdout. Anything
-# stinkytofu / rocisa prints during import or init (e.g. the
-# ``IntrinsicRegistry: Loaded N intrinsics`` banner) lands outside the
-# sentinels and gets dropped by the extractor.
-_BEGIN = "<<<EMIT_BEGIN_E5A9E2>>>"
-_END = "<<<EMIT_END_E5A9E2>>>"
+class _EmitWorker:
+    """A long-lived interpreter pinned to one ``ROCISA_BACKEND`` value.
 
-
-def _run_in_subproc(script: str, *, backend, timeout: float = 30) -> str:
-    """Run @p script in a fresh Python process and return the emitted asm.
-
-    @p backend == None   -> default rocisa (no ROCISA_BACKEND env var)
-    @p backend == "stinkytofu"  -> our adapter (via env var)
-
-    The script is wrapped so that the asm payload is written between
-    sentinels; banner prints from third-party imports are stripped.
-    PYTHONPATH and other env vars are inherited from the parent process so
-    that ``import rocisa`` / ``import stinkytofu`` resolve to the built
-    .so files that the parent test runner could already see.
+    PYTHONPATH and every other env var are inherited from the parent test
+    runner (the ``test.sh`` wrapper in this directory sets PYTHONPATH plus
+    the ROCm ``PATH``/``LD_LIBRARY_PATH``), so ``import rocisa`` /
+    ``import stinkytofu`` resolve to the same built ``.so`` files.
     """
-    env = os.environ.copy()
-    env.pop("ROCISA_BACKEND", None)
-    if backend is not None:
-        env["ROCISA_BACKEND"] = backend
-    # PYTHONPATH is inherited from the parent runner (the test.sh wrapper
-    # in this directory sets it; manual ``python3`` invocations need to
-    # set it themselves).
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"emission subprocess (backend={backend!r}) failed "
-            f"with exit {proc.returncode}\n"
-            f"--- stderr ---\n{proc.stderr}\n"
-            f"--- stdout ---\n{proc.stdout}\n"
-            f"--- script ---\n{script}"
+
+    def __init__(self, backend):
+        self.backend = backend
+        env = os.environ.copy()
+        env.pop("ROCISA_BACKEND", None)
+        if backend is not None:
+            env["ROCISA_BACKEND"] = backend
+        # ``-u`` = unbuffered stdio so readline() cannot deadlock on buffering.
+        self.proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", _WORKER_SRC],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            bufsize=1,
         )
-    start = proc.stdout.find(_BEGIN)
-    end = proc.stdout.find(_END)
-    if start < 0 or end < 0 or end < start:
+
+    def emit(self, script: str) -> str:
+        if self.proc.poll() is not None:
+            raise AssertionError(
+                f"emit worker (backend={self.backend!r}) is not running "
+                f"(exit {self.proc.returncode}); "
+                f"stderr:\n{self.proc.stderr.read()}"
+            )
+        enc = base64.b64encode(script.encode("utf-8")).decode("ascii")
+        self.proc.stdin.write(enc + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            # Worker died mid-request (e.g. a segfault in a C++ emit path).
+            err = self.proc.stderr.read()
+            raise AssertionError(
+                f"emit worker (backend={self.backend!r}) died while handling "
+                f"a request.\n--- stderr ---\n{err}\n--- script ---\n{script}"
+            )
+        tag, _, data = line.strip().partition(" ")
+        text = base64.b64decode(data).decode("utf-8") if data else ""
+        if tag == "OK":
+            return text
         raise AssertionError(
-            f"emission subprocess (backend={backend!r}) returned 0 but "
-            f"sentinels were not found in stdout.\n"
-            f"--- stdout ---\n{proc.stdout}\n"
-            f"--- stderr ---\n{proc.stderr}\n"
-            f"--- script ---\n{script}"
+            f"emission (backend={self.backend!r}) failed.\n"
+            f"--- worker traceback ---\n{text}\n--- script ---\n{script}"
         )
-    return proc.stdout[start + len(_BEGIN):end]
+
+    def close(self):
+        if self.proc.poll() is None:
+            try:
+                self.proc.stdin.write("__QUIT__\n")
+                self.proc.stdin.flush()
+                self.proc.wait(timeout=5)
+            except Exception:
+                self.proc.kill()
+
+
+_WORKERS: dict = {}
+
+
+def _emit_via_worker(script: str, *, backend) -> str:
+    """Run @p script (which must define ``_payload``) in @p backend's worker.
+
+    Lazily starts the worker on first use and reuses it thereafter; a worker
+    that has died is transparently replaced.
+    """
+    w = _WORKERS.get(backend)
+    if w is None or w.proc.poll() is not None:
+        w = _EmitWorker(backend)
+        _WORKERS[backend] = w
+    return w.emit(script)
+
+
+@atexit.register
+def _shutdown_workers():
+    for w in _WORKERS.values():
+        w.close()
+    _WORKERS.clear()
 
 
 # Shared preamble: ``init`` loads caps for ``arch_tuple``; ``setKernel`` binds
@@ -163,7 +298,7 @@ def _run_in_subproc(script: str, *, backend, timeout: float = 30) -> str:
 _INIT_PREAMBLE = textwrap.dedent("""\
     import rocisa
     _ri = rocisa.rocIsa.getInstance()
-    _ri.init({arch_tuple}, "", False)
+    _ri.init({arch_tuple}, {asm_path!r}, False)
     _ri.setKernel({arch_tuple}, 64)
 """)
 
@@ -201,26 +336,15 @@ def _strip_kernel_descriptor(asm: str, kernel_name: str) -> str:
     return asm[idx + len(marker):]
 
 
-_EMIT_TAIL = textwrap.dedent(f"""\
-
-    import sys
-    sys.stdout.write({_BEGIN!r})
-    sys.stdout.write(_payload)
-    sys.stdout.write({_END!r})
-    sys.stdout.flush()
-""")
-
-
 def emit_path1_rocisa_tostring(build_snippet: str, *,
                                arch_tuple=(12, 5, 0)) -> str:
     """Path 1 -- default rocisa native + ``str(module)``."""
     script = (
-        _INIT_PREAMBLE.format(arch_tuple=arch_tuple)
+        _INIT_PREAMBLE.format(arch_tuple=arch_tuple, asm_path=_ASM_PATH)
         + build_snippet
         + "\n_payload = str(module)\n"
-        + _EMIT_TAIL
     )
-    return _run_in_subproc(script, backend=None)
+    return _emit_via_worker(script, backend=None)
 
 
 def emit_path2_rocisa_stinkyasm(build_snippet: str, *,
@@ -234,7 +358,7 @@ def emit_path2_rocisa_stinkyasm(build_snippet: str, *,
     compared.
     """
     script = (
-        _INIT_PREAMBLE.format(arch_tuple=arch_tuple)
+        _INIT_PREAMBLE.format(arch_tuple=arch_tuple, asm_path=_ASM_PATH)
         + build_snippet
         + textwrap.dedent(f"""\
 
@@ -257,9 +381,8 @@ def emit_path2_rocisa_stinkyasm(build_snippet: str, *,
             )
             _payload = st.emitAssembly()
         """)
-        + _EMIT_TAIL
     )
-    raw = _run_in_subproc(script, backend=None)
+    raw = _emit_via_worker(script, backend=None)
     return _strip_kernel_descriptor(raw, kernel_name)
 
 
@@ -274,16 +397,15 @@ def emit_path3_adapter_logical(build_snippet: str, *,
     via ``lower_logical_module``.
     """
     script = (
-        _INIT_PREAMBLE.format(arch_tuple=arch_tuple)
+        _INIT_PREAMBLE.format(arch_tuple=arch_tuple, asm_path=_ASM_PATH)
         + build_snippet
         + textwrap.dedent(f"""\
 
             _asm_mod = module.to_stinky_asm(list({arch_tuple}))
             _payload = _asm_mod.emitAssembly()
         """)
-        + _EMIT_TAIL
     )
-    return _run_in_subproc(script, backend="stinkytofu")
+    return _emit_via_worker(script, backend="stinkytofu")
 
 
 # ===========================================================================
@@ -309,8 +431,7 @@ class _ThreePathEqualityCase:
     ARCH_TUPLE: tuple = (12, 5, 0)
     KERNEL_NAME: str = "k"
 
-    @unittest.skipUnless(_STINKY_OK,
-                         "path-3 needs the stinkytofu Python binding")
+    @unittest.skipUnless(_EMISSION_OK, _EMISSION_SKIP_REASON)
     def test_path1_equals_path3(self):
         """Native ``toString`` == adapter logical-IR pipeline emit.
 
@@ -327,8 +448,7 @@ class _ThreePathEqualityCase:
             f"\n[path-3 adapter   ] {b!r}",
         )
 
-    @unittest.skipUnless(_STINKY_OK,
-                         "path-2 needs stinkytofu compiled into rocisa")
+    @unittest.skipUnless(_EMISSION_OK, _EMISSION_SKIP_REASON)
     def test_path1_equals_path2(self):
         """Native ``toString`` == native ``toStinkyTofuModule`` body.
 
@@ -345,8 +465,7 @@ class _ThreePathEqualityCase:
             f"\n[path-2 stinky-asm] {b!r}",
         )
 
-    @unittest.skipUnless(_STINKY_OK,
-                         "paths 2 and 3 need the stinkytofu binding")
+    @unittest.skipUnless(_EMISSION_OK, _EMISSION_SKIP_REASON)
     def test_path2_equals_path3(self):
         """Native ``toStinkyTofuModule`` body == adapter logical-IR emit.
 

@@ -25,6 +25,9 @@
 #   STINKY_BUILD_DIR  if set, skip glob discovery and use this directory
 #                     (must contain ``stinkytofu/__init__.py`` and
 #                     ``rocisa/__init__.py``).
+#   ROCM_PATH         if set, skip ROCm auto-detection and use this dir for
+#                     comgr (lib/) and the assembler (bin/amdclang++);
+#                     otherwise /opt/rocm-versions/* and /opt/rocm* are probed.
 #
 # Exit codes
 # ----------
@@ -118,6 +121,38 @@ if [[ -n "${PYTHONPATH:-}" ]]; then
     export PYTHONPATH="${new_paths}:${PYTHONPATH}"
 else
     export PYTHONPATH="${new_paths}"
+fi
+
+# ----------------------------------------------------------------------------
+# Locate a ROCm install for the emission tests' native caps probe.
+#
+# The native rocisa caps computation loads ``libamd_comgr.so.3`` and (for the
+# emission-consistency suite) runs ``amdclang++``; neither is on
+# LD_LIBRARY_PATH / PATH in a bare container. Auto-detect a ROCm dir that
+# provides both and prepend its ``lib``/``bin`` so ``import stinkytofu``
+# (comgr) resolves and the assembler is discoverable. Override with ROCM_PATH.
+# If none is found we only warn -- the affected tests self-skip with a message.
+# ----------------------------------------------------------------------------
+rocm_dir="${ROCM_PATH:-}"
+if [[ -z "${rocm_dir}" ]]; then
+    shopt -s nullglob
+    for cand in /opt/rocm-versions/*/ /opt/rocm*/; do
+        cand="${cand%/}"
+        if [[ -x "${cand}/bin/amdclang++" && -e "${cand}/lib/libamd_comgr.so.3" ]]; then
+            rocm_dir="${cand}"
+            break
+        fi
+    done
+    shopt -u nullglob
+fi
+
+if [[ -n "${rocm_dir}" ]]; then
+    export PATH="${rocm_dir}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${rocm_dir}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+else
+    echo "WARNING: no ROCm dir with bin/amdclang++ + lib/libamd_comgr.so.3 found" >&2
+    echo "         (looked at \$ROCM_PATH, /opt/rocm-versions/*, /opt/rocm*)." >&2
+    echo "         comgr/assembler-dependent tests will skip; set ROCM_PATH to enable." >&2
 fi
 
 cd "${SCRIPT_DIR}"
