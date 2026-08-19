@@ -46,6 +46,44 @@ from kernels.gfx1151.wmma_fmha_swapqk import (
 from .bench_v_staging import _ref_attention
 
 
+def _build_paged_v(np, V, block_size: int, *, shuffle: bool = True):
+    """Relay V [B,Sk,Hk,D] into a fake vLLM-shaped paged cache + block table.
+
+    Mirrors what ``reshape_and_cache`` already produces at KV-cache-write time:
+    ``[num_blocks, Hk, D, block_size]``, i.e. token FASTEST -- which is exactly
+    the order the PV A-fragment wants, and the reason this kernel can drop the
+    caller's per-layer transpose entirely.
+
+    Two deliberate hostilities, because the failure mode is a kernel that
+    ignores the block table and still returns plausible numbers:
+
+    * pages are SHUFFLED and over-allocated, so physical order != logical order
+      and a kernel that treats the cache as contiguous reads a different
+      request's keys rather than its own;
+    * unused pages (and the padding of used ones) are POISONED with 7777.0
+      instead of zero, so an off-by-one page lands on a value that blows past
+      any tolerance instead of quietly attenuating the output.
+    """
+    B, Sk, Hk, D = V.shape
+    if Sk % block_size:
+        raise SystemExit(f"seqlen_k={Sk} must be a multiple of kv_block_size={block_size}")
+    per_req = Sk // block_size
+    needed = B * per_req
+    # Slack pages exist only to be poison: they prove nothing is read past the
+    # table, and they push the used ids off the identity mapping.
+    num_blocks = needed + max(4, needed // 2)
+
+    rng = np.random.default_rng(0x9A9ED)
+    ids = rng.permutation(num_blocks)[:needed] if shuffle else np.arange(needed)
+    block_table = ids.astype(np.int32).reshape(B, per_req)
+
+    cache = np.full((num_blocks, Hk, D, block_size), 7777.0, dtype=np.float16)
+    # [B,Sk,Hk,D] -> [B,per_req,Hk,D,BS]; the last axis is the in-page token.
+    src = V.reshape(B, per_req, block_size, Hk, D).transpose(0, 1, 3, 4, 2)
+    cache[block_table] = src
+    return np.ascontiguousarray(cache), np.ascontiguousarray(block_table)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arch", default="gfx1151")
@@ -92,6 +130,25 @@ def main() -> int:
         action="store_true",
         help="stage the K tile in shared LDS (block_n=64 only; V stays on the gather)",
     )
+    p.add_argument(
+        "--v-paged",
+        action="store_true",
+        help="read V from a fake paged cache [num_blocks,Hk,D,BS] via a block table",
+    )
+    p.add_argument(
+        "--kv-block-size",
+        type=int,
+        default=16,
+        help="tokens per physical page under --v-paged (multiple of 16)",
+    )
+    p.add_argument(
+        "--shuffle-blocks",
+        type=int,
+        default=1,
+        choices=(0, 1),
+        help="scatter the pages non-contiguously (default on: a kernel that "
+        "ignores the block table still PASSES against an identity table)",
+    )
     p.add_argument("--tol", type=float, default=2e-2)
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--warmup", type=int, default=15)
@@ -118,6 +175,8 @@ def main() -> int:
         lazy_rescale=bool(args.lazy_rescale),
         gqa_fuse=args.gqa_fuse,
         k_lds=args.k_lds,
+        v_paged=args.v_paged,
+        kv_block_size=args.kv_block_size if args.v_paged else 0,
     )
     ok, why = is_valid_spec(cfg, args.arch)
     if not ok:
@@ -158,7 +217,19 @@ def main() -> int:
     Out = np.zeros((B, Sq, Hq, D), dtype=np.float16)
 
     # The reference consumes V row-major; only the device copy is relaid.
-    V_dev = swapqk_transpose_v(V) if cfg.v_transposed else V
+    if cfg.v_paged:
+        V_dev, block_table = _build_paged_v(
+            np, V, cfg.kv_block_size, shuffle=bool(args.shuffle_blocks)
+        )
+        bt_stride = block_table.shape[1]
+        bt_num_entries = block_table.size
+        print(
+            f"[{args.arch}] paged V: cache{V_dev.shape} bs={cfg.kv_block_size} "
+            f"block_table{block_table.shape} shuffled={bool(args.shuffle_blocks)}"
+        )
+    else:
+        V_dev = swapqk_transpose_v(V) if cfg.v_transposed else V
+        block_table, bt_stride, bt_num_entries = None, 0, 0
     scale_log2 = float(1.0 / math.sqrt(D) * math.log2(math.e))
 
     grid = swapqk_grid(cfg, seqlen_q=Sq, batch=B)
@@ -176,6 +247,10 @@ def main() -> int:
     rt.memcpy_h2d(kd, u8(K), K.nbytes)
     rt.memcpy_h2d(vd, u8(V_dev), V_dev.nbytes)
     rt.memset(od, 0, Out.nbytes)
+    btd = 0
+    if block_table is not None:
+        btd = rt.alloc(block_table.nbytes)
+        rt.memcpy_h2d(btd, u8(block_table), block_table.nbytes)
 
     # Within-batch element strides; the kernel folds the batch axis in itself.
     # These stay the row-major values under v_transposed -- the transposed
@@ -198,6 +273,13 @@ def main() -> int:
         Hq * D,
         D,
     )
+    if cfg.v_paged:
+        # VBlockTable/bt_stride/bt_num_entries are appended LAST, so everything
+        # above stays byte-identical. The "4x" is not cosmetic: the kernarg ABI
+        # aligns each argument to its own size, and this pointer follows an ODD
+        # number of i32s -- without the pad it lands 4 bytes early and the
+        # kernel dereferences garbage.
+        packed += struct.pack("<4xQii", btd, bt_stride, bt_num_entries)
 
     def launch_once():
         rt.launch(fn, grid, block, packed)

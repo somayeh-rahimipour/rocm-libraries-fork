@@ -543,6 +543,30 @@ class SwapQKCfg:
     # latency. Adding requests-in-flight cannot cover that without spending the
     # very cache residency that makes those hits cheap.
     v_prefetch: int = 0
+    # v_paged: source V from a PAGED cache addressed through a block table,
+    # instead of one contiguous [B, H, D, S] buffer.
+    #
+    # This exists because the transpose v_transposed demands is work an inference
+    # server has ALREADY done. vLLM's paged V cache is stored
+    # [num_blocks, num_kv_heads, head_size, block_size] -- token is the
+    # fastest-varying dim, exactly the order the PV A-operand wants. Reading it
+    # directly deletes the caller's per-layer permute -- a few percent of decoder
+    # prefill time at S=8192, and it grows with S -- while keeping the 2x dwordx4
+    # gather. The alternative -- v_transposed=False to skip the permute -- was
+    # measured and is a WASH: the row-major gather costs back what the permute
+    # saved, crossover near S=4096.
+    #
+    # Addressing is strictly BETTER behaved than the contiguous transpose. The
+    # per-lane term shrinks from d_col*seqlen_k (up to 2.08 MB, a runtime
+    # multiply) to d_col*kv_block_size (<= 4064 B, a compile-time constant), and
+    # the runtime part moves into the uniform SGPR soffset.
+    #
+    # kv_block_size must be a multiple of 16 so a 16-key WMMA A-fragment never
+    # straddles a physical block -- that is what keeps the gather 2 loads wide.
+    # vLLM enforces the same constraint independently (and defaults to 16 on
+    # ROCm), so this costs nothing in practice.
+    v_paged: bool = False
+    kv_block_size: int = 0
     # NOTE on the dual-gather broadcast cost (248 v_cndmask_b32 + 146
     # v_permlanex16_b32 in dual_gather_finish, together ~16% of the K-loop's issue
     # cycles). Two routes to make it cheaper, both checked against the ISA:
@@ -846,6 +870,9 @@ class SwapQKCfg:
             # same rule as gf: keep every pre-k_lds name byte-identical, but never
             # let the artifact cache serve a non-LDS binary for an LDS config.
             *(("klds",) if self.k_lds else ()),
+            # same rule again: a paged build must never share a cache key with a
+            # contiguous one, and the block size is baked into the addressing.
+            *((f"vpg{self.kv_block_size}",) if self.v_paged else ()),
         )
 
 
@@ -946,6 +973,28 @@ def is_valid_spec(cfg: SwapQKCfg, arch: str = "gfx1151") -> "tuple[bool, str]":
                 f"k_lds coop loader needs block_n*head_size ({_tot}) divisible by "
                 f"block_size*8 ({cfg.block_size * 8})",
             )
+    if cfg.v_paged:
+        if not cfg.v_transposed:
+            # the paged cache IS the transposed layout; v_paged only says where
+            # the transposed data lives.
+            return False, "v_paged requires v_transposed"
+        if cfg.v_kblock:
+            return False, "v_paged is incompatible with v_kblock"
+        if cfg.kv_block_size <= 0 or cfg.kv_block_size % 16:
+            return (
+                False,
+                f"v_paged needs kv_block_size a positive multiple of 16 (got "
+                f"{cfg.kv_block_size}), else a 16-key fragment straddles blocks",
+            )
+        if cfg.block_n % cfg.kv_block_size and cfg.kv_block_size % cfg.block_n:
+            return (
+                False,
+                f"v_paged needs block_n ({cfg.block_n}) and kv_block_size "
+                f"({cfg.kv_block_size}) to divide one another, so each sub-tile's "
+                f"block index is a compile-time offset from the tile's",
+            )
+    elif cfg.kv_block_size:
+        return False, "kv_block_size requires v_paged"
     return True, ""
 
 
@@ -1001,7 +1050,7 @@ def swapqk_causal_kv_stop(cfg: SwapQKCfg, q_group: int) -> int:
     return (q_group * cfg.q_rows_per_cta + cfg.q_rows_per_cta - 1) // cfg.block_n + 1
 
 
-def _declare_params(b: IRBuilder, *, persistent: bool = False):
+def _declare_params(b: IRBuilder, *, persistent: bool = False, v_paged: bool = False):
     P = {}
     P["Q"] = b.param("Q", PtrType(F16, "global"), noalias=True, readonly=True, align=16)
     P["K"] = b.param("K", PtrType(F16, "global"), noalias=True, readonly=True, align=16)
@@ -1030,6 +1079,22 @@ def _declare_params(b: IRBuilder, *, persistent: bool = False):
         "stride_o_head",
     ):
         P[nm] = b.param(nm, I32)
+    if v_paged:
+        # Appended LAST and only under v_paged, so every existing arg pack keeps
+        # its ABI byte-for-byte. VBlockTable is the [num_reqs, bt_stride] i32
+        # table mapping a request's logical block index to a physical one; V is
+        # then the base of the paged cache rather than a contiguous [B,H,D,S]
+        # buffer. bt_num_entries (= num_reqs*bt_stride) bounds the lookup: an
+        # over-fetched entry past the end of the table would otherwise be
+        # uninitialised memory that can point the gather at an unmapped page.
+        # align=4, not 16: a caller launching one request per grid may hand over
+        # a ROW of the table rather than its base, and row i only inherits the
+        # element alignment.
+        P["VBlockTable"] = b.param(
+            "VBlockTable", PtrType(I32, "global"), noalias=True, readonly=True, align=4
+        )
+        P["bt_stride"] = b.param("bt_stride", I32)
+        P["bt_num_entries"] = b.param("bt_num_entries", I32)
     return P
 
 
@@ -1084,7 +1149,7 @@ def build_wmma_fmha_swapqk(
     b.kernel.attrs["max_workgroup_size"] = cfg.block_size
     if cfg.waves_per_eu is not None:
         b.kernel.attrs["waves_per_eu"] = cfg.waves_per_eu
-    p = _declare_params(b, persistent=PERS)
+    p = _declare_params(b, persistent=PERS, v_paged=cfg.v_paged)
 
     c0 = b.const_i32(0)
     c16 = b.const_i32(16)
@@ -1244,6 +1309,32 @@ def build_wmma_fmha_swapqk(
             raise ValueError(f"v_kblock must be 0, 2, 4 or 8 (got {cfg.v_kblock})")
     elif cfg.v_kblock:
         raise ValueError("v_kblock requires v_transposed")
+    if cfg.v_paged:
+        if not cfg.v_transposed:
+            raise ValueError("v_paged requires v_transposed")
+        if not cfg.buffer_gather:
+            raise ValueError("v_paged requires buffer_gather")
+        if cfg.kv_lds:
+            raise ValueError("v_paged is incompatible with kv_lds")
+        if cfg.v_kblock:
+            raise ValueError("v_paged is incompatible with v_kblock")
+        if cfg.v_prefetch or cfg.prefetch_v:
+            # the block-table lookup is a global load the gather DEPENDS on, so
+            # its in-order vmcnt wait drains any V gather carried across it.
+            raise ValueError("v_paged is incompatible with v_prefetch/prefetch_v")
+        if cfg.kv_block_size <= 0 or cfg.kv_block_size % 16:
+            raise ValueError(
+                f"v_paged needs kv_block_size a positive multiple of 16 (got "
+                f"{cfg.kv_block_size}): a 16-key A-fragment must not straddle "
+                f"two physical blocks"
+            )
+        if cfg.block_n % cfg.kv_block_size and cfg.kv_block_size % cfg.block_n:
+            raise ValueError(
+                f"v_paged needs block_n ({cfg.block_n}) and kv_block_size "
+                f"({cfg.kv_block_size}) to divide one another"
+            )
+    elif cfg.kv_block_size:
+        raise ValueError("kv_block_size requires v_paged")
     if cfg.bcast_group < 0:
         raise ValueError(f"bcast_group must be >= 0, got {cfg.bcast_group}")
     if cfg.bcast_group and not cfg.dual_gather:
@@ -1401,6 +1492,8 @@ def build_wmma_fmha_swapqk(
 
     KB = cfg.v_kblock
     if cfg.v_transposed:
+        c16b = b.const_i32(16)  # byte offset of the second dwordx4 (kv 8..15)
+    if cfg.v_transposed and not cfg.v_paged:
         # Both transposed forms put the head base at kv_head*(hs*S) and both are
         # addressed from k_base = batch*S + k_local (the [B,S,H,D] convention the
         # callers use), so the batch term needs scaling up by kvh*hs.
@@ -1411,7 +1504,6 @@ def build_wmma_fmha_swapqk(
                 b.const_i32(hs * (kvh - 1) if KB else kvh * hs - 1),
             ),
         )
-        c16b = b.const_i32(16)  # byte offset of the second dwordx4 (kv 8..15)
 
     def _load_col_transposed(k_base, d_col):
         """Contiguous-in-k V read: the lane's 16 keys are 32 consecutive bytes,
@@ -1461,7 +1553,130 @@ def build_wmma_fmha_swapqk(
         ]
         return b.vec_bitcast(b.vec_pack(words, I32), VectorType(dtype_ir, a_frag))
 
-    _load_v_wide = _load_col_blocked if KB else _load_col_transposed
+    def _load_col_paged(k_base, d_col):
+        """Paged twin of ``_load_col_transposed``. Same 2 x dwordx4, but the
+        addressing is split differently.
+
+        The cache is [num_blocks, kvh, hs, BS], so within one physical block a
+        lane's 16 keys are still 32 consecutive bytes -- ``kv_block_size % 16 ==
+        0`` is what guarantees they do not straddle a block boundary. The only
+        change is which part of the address is per-lane:
+
+            contiguous:  voffset = (v_t_cta + d_col*seqlen_k) * 2
+            paged:       voffset = d_col * BS * 2
+
+        so the per-lane term stops depending on the runtime seqlen (it is a
+        compile-time constant multiply of at most BS*hs*2 bytes) and everything
+        runtime moves into the uniform soffset, which the caller has already
+        folded into ``k_base``. That is why ``k_base`` here is a paged ELEMENT
+        base (block + head + token), not the [B,S,H,D] token index the other
+        branches take -- see ``paged_v_bases``.
+        """
+        voff = b.mul(d_col, b.const_i32(cfg.kv_block_size * 2))
+        soff = b.mul(k_base, c2)
+        halves = [
+            b.buffer_load_vN_f16(v_rsrc, voff, soff, 4),  # kv 0..7
+            b.buffer_load_vN_f16(v_rsrc, voff, b.add(soff, c16b), 4),  # kv 8..15
+        ]
+        words = [
+            b.vec_extract(b.vec_bitcast(h, VectorType(I32, 4)), i)
+            for h in halves
+            for i in range(4)
+        ]
+        return b.vec_bitcast(b.vec_pack(words, I32), VectorType(dtype_ir, a_frag))
+
+    if cfg.v_paged:
+        _load_v_wide = _load_col_paged
+    elif KB:
+        _load_v_wide = _load_col_blocked
+    else:
+        _load_v_wide = _load_col_transposed
+
+    if cfg.v_paged:
+        _BS = cfg.kv_block_size
+        VBT = p["VBlockTable"]
+        # Both CTA-uniform: the request's row in the [num_reqs, bt_stride] table,
+        # and the total entry count that bounds an over-fetched lookup.
+        _bt_row = b.to_sgpr_u32(b.mul(batch, p["bt_stride"]))
+        _bt_max = b.to_sgpr_u32(p["bt_num_entries"])
+        # Per-CTA head term of the element base. Note kvh*hs*BS, NOT hs*seqlen_k:
+        # seqlen_k must not appear anywhere in a paged V address.
+        _v_head_off = b.mul(kv_head, b.const_i32(hs * _BS))
+        _blk_scale = b.const_i32(kvh * hs * _BS)
+        # Where sub-tile ns sits relative to the tile's own block/token origin.
+        # is_valid_spec forces block_n and BS to divide one another, so both are
+        # compile-time constants: when BS <= block_n the tile spans block_n/BS
+        # blocks, and when BS > block_n the whole tile is inside one block.
+        if block_n % _BS == 0:
+            _spb = _BS // 16  # 16-key sub-tiles per physical block
+            _lb_add = [ns // _spb for ns in range(n_kv_sub)]
+            _tok_add = [(ns % _spb) * 16 for ns in range(n_kv_sub)]
+        else:
+            _lb_add = [0] * n_kv_sub
+            _tok_add = [ns * 16 for ns in range(n_kv_sub)]
+
+        class _PagedBases:
+            """Per-sub-tile paged element bases, materialised ON FIRST USE.
+
+            The block id arrives via a global load, and lifting it to an SGPR
+            (mandatory -- see below) forces an in-order ``s_waitcnt vmcnt``. If
+            that wait were emitted where the lookups are ISSUED, at the top of
+            the K-loop, it would drain the previous iteration's V gathers and O
+            stores. So the loads are issued early and the readfirstlane is
+            deferred to the first actual gather, by which point the coop K loads
+            and the QK have already been issued behind it.
+            """
+
+            def __init__(self, k_block_base):
+                lb0 = b.div(k_block_base, b.const_i32(_BS))
+                tok0 = b.mod(k_block_base, b.const_i32(_BS))
+                # Distinct logical blocks only: at block_n=64/BS=16 that is 4
+                # lookups, at BS>=64 it is 1.
+                self._raw = {}
+                for add in sorted(set(_lb_add)):
+                    idx = b.add(_bt_row, b.add(lb0, b.const_i32(add)))
+                    self._raw[add] = b.masked_global_load(
+                        VBT,
+                        idx,
+                        b.cmp_lt(idx, _bt_max),
+                        b.const_i32(0),  # block 0 is always a valid page
+                        I32,
+                        align=4,
+                    )
+                self._tok0 = tok0
+                self._sgpr = {}
+                self._memo = {}
+
+            def _block(self, add):
+                # to_sgpr_u32 on the RAW block id is NOT an optimisation.
+                # AMDGPU treats every addrspace(1) load as a divergence source,
+                # so without it the backend cannot prove the buffer soffset is
+                # wave-uniform and wraps EVERY V load in a 32-iteration
+                # waterfall loop. Promote first, scale after, so all the
+                # multiply-adds land on the SALU. Memoised per DISTINCT block:
+                # readfirstlane is convergent, so LLVM will not CSE two calls on
+                # the same value, and at BS >= block_n every sub-tile shares one.
+                if add not in self._sgpr:
+                    self._sgpr[add] = b.to_sgpr_u32(self._raw[add])
+                return self._sgpr[add]
+
+            def __getitem__(self, ns):
+                if ns not in self._memo:
+                    blk = self._block(_lb_add[ns])
+                    tok = b.add(self._tok0, b.const_i32(_tok_add[ns]))
+                    self._memo[ns] = b.add(
+                        b.add(b.mul(blk, _blk_scale), _v_head_off), tok
+                    )
+                return self._memo[ns]
+
+        def paged_v_bases(k_block_base):
+            return _PagedBases(k_block_base)
+
+    else:
+
+        def paged_v_bases(k_block_base):
+            raise AssertionError("paged_v_bases is only reachable under v_paged")
+
 
     def gather_v_a_frag_buf(k_base, d):
         # k_base = batch_tok_k + k_block_base + ns*16 (uniform i32). Per-lane
@@ -1817,10 +2032,13 @@ def build_wmma_fmha_swapqk(
             l_i = [state[g * gs + 1] for g in range(MQ)]
             accs = [list(state[g * gs + 2 : g * gs + 2 + n_dk]) for g in range(MQ)]
             k_block_base = b.mul(kt, c_block_n)
-            k_bases = [
-                b.add(b.add(batch_tok_k, k_block_base), b.const_i32(ns * 16))
-                for ns in range(n_kv_sub)
-            ]
+            if cfg.v_paged:
+                k_bases = paged_v_bases(k_block_base)
+            else:
+                k_bases = [
+                    b.add(b.add(batch_tok_k, k_block_base), b.const_i32(ns * 16))
+                    for ns in range(n_kv_sub)
+                ]
             vwins = [
                 v_window(b.add(k_block_base, b.const_i32(ns * 16)))
                 for ns in range(n_kv_sub)
@@ -2029,6 +2247,11 @@ def build_wmma_fmha_swapqk(
         if cfg.iglp >= 0:
             b.iglp_opt(cfg.iglp)
 
+        # Issue this tile's block-table lookups FIRST, ahead of the coop K loads
+        # and the QK, so the vmcnt wait their readfirstlane forces (deferred to
+        # the first V gather, below) has that whole prologue to hide behind.
+        _paged_k_bases = paged_v_bases(k_block_base) if cfg.v_paged else None
+
         # k_lds/kv_lds: cooperatively stage this K-tile into shared LDS BEFORE the
         # QK reads it (the whole CTA then shares the one copy).
         if _KLDS:
@@ -2061,10 +2284,14 @@ def build_wmma_fmha_swapqk(
                 v_window(b.add(k_block_base, b.const_i32(ns * 16)))
                 for ns in range(n_kv_sub)
             ]
-        k_bases = [
-            b.add(b.add(batch_tok_k, k_block_base), b.const_i32(ns * 16))
-            for ns in range(n_kv_sub)
-        ]
+        k_bases = (
+            _paged_k_bases
+            if cfg.v_paged
+            else [
+                b.add(b.add(batch_tok_k, k_block_base), b.const_i32(ns * 16))
+                for ns in range(n_kv_sub)
+            ]
+        )
 
         def do_gather(ns, d):
             if cfg.buffer_gather and not cfg.kv_lds:

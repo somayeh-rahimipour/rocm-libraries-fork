@@ -564,6 +564,179 @@ class TestSwapQKKLds(unittest.TestCase):
                 build_wmma_fmha_swapqk(self._fused(**kw), arch="gfx1151")
 
 
+class TestSwapQKPagedV(unittest.TestCase):
+    """v_paged reads V straight out of a paged cache through a block table.
+
+    The point is to DELETE the caller's ``v.permute(...).contiguous()``, which
+    runs at a small fraction of achievable bandwidth and costs a few percent of
+    decoder prefill time at S=8192 -- by using the fact that the paged cache
+    already stores V as
+    [num_blocks, kvh, hs, block_size], i.e. token-fastest, which is exactly the
+    order the PV A-fragment wants.
+
+    Two failure modes here are silent and expensive, so both are pinned:
+      * falling off the 2 x dwordx4 gather onto the 16 x d16 row-major path,
+        which already measured a WASH end-to-end at S=8192, the gather cost
+        cancelling the permute it saves;
+      * the block id staying in a VGPR, which makes AMDGPU wrap every V load in
+        a 32-iteration waterfall loop. Both still compile and both still
+        compute correct attention.
+    """
+
+    @staticmethod
+    def _cfg(**kw):
+        # The shipped production config, plus the lever under test.
+        return _prod_cfg(num_kv_heads=6, mask_mode="causal", gqa_fuse=4, k_lds=True, **kw)
+
+    def _lower(self, cfg):
+        from rocke.core.lower_llvm import lower_kernel_to_llvm
+
+        return lower_kernel_to_llvm(
+            build_wmma_fmha_swapqk(cfg, arch="gfx1151"), arch="gfx1151"
+        )
+
+    def test_paged_is_valid_and_lowers_for_the_production_config(self):
+        for bs in (16, 32, 64, 128):
+            cfg = self._cfg(v_paged=True, kv_block_size=bs)
+            ok, why = is_valid_spec(cfg)
+            self.assertTrue(ok, f"bs={bs}: {why}")
+            self.assertIn("llvm.amdgcn.wmma.f32.16x16x16.f16", self._lower(cfg))
+
+    def test_kernel_name_gains_vpg_and_is_otherwise_unchanged(self):
+        # Same cache-key rule as gf/klds: a paged binary must never be served to
+        # a contiguous build, since the two disagree about what the V pointer
+        # even means -- and every pre-paging name must stay byte-identical.
+        base = self._cfg()
+        self.assertNotIn("vpg", base.kernel_name())
+        names = {base.kernel_name()}
+        for bs in (16, 32, 64):
+            n = self._cfg(v_paged=True, kv_block_size=bs).kernel_name()
+            self.assertEqual(n, base.kernel_name() + f"_vpg{bs}")
+            names.add(n)
+        self.assertEqual(len(names), 4)
+
+    def test_abi_appends_exactly_the_paged_params_and_only_when_paged(self):
+        # The backend packs arguments positionally. Appending is what lets the
+        # non-paged arg pack stay byte-identical; an INSERTED param would
+        # mis-address every kernel that is not under test here.
+        base = build_wmma_fmha_swapqk(self._cfg(), arch="gfx1151")
+        paged = build_wmma_fmha_swapqk(
+            self._cfg(v_paged=True, kv_block_size=16), arch="gfx1151"
+        )
+        b_names = [p.name for p in base.params]
+        p_names = [p.name for p in paged.params]
+        self.assertEqual(p_names[: len(b_names)], b_names)
+        self.assertEqual(
+            p_names[len(b_names) :], ["VBlockTable", "bt_stride", "bt_num_entries"]
+        )
+
+    def test_rejects_the_knobs_that_also_own_the_v_operand(self):
+        for kw, token in (
+            (dict(v_transposed=False), "v_transposed"),
+            (dict(v_kblock=8), "v_kblock"),
+            (dict(kv_block_size=0), "kv_block_size"),
+            (dict(kv_block_size=24), "kv_block_size"),
+            (dict(kv_block_size=8), "kv_block_size"),
+        ):
+            cfg = self._cfg(v_paged=True, **{**dict(kv_block_size=16), **kw})
+            ok, why = is_valid_spec(cfg)
+            self.assertFalse(ok, f"{kw} must be rejected under v_paged")
+            self.assertIn(token, why)
+
+    def test_rejects_block_sizes_that_do_not_tile_the_kv_block(self):
+        # Sub-tile ns must sit at a COMPILE-TIME block/token offset from the
+        # tile's origin; if neither size divides the other that offset becomes a
+        # runtime divide and the lookup count stops being static.
+        ok, why = is_valid_spec(self._cfg(v_paged=True, kv_block_size=48))
+        self.assertFalse(ok)
+        self.assertIn("kv_block_size", why)
+
+    def test_kv_block_size_without_v_paged_is_rejected(self):
+        # Otherwise the field reads as configured while nothing consumes it.
+        ok, why = is_valid_spec(self._cfg(kv_block_size=16))
+        self.assertFalse(ok)
+        self.assertIn("kv_block_size", why)
+
+    def test_builder_raises_on_the_incompatible_pairs(self):
+        for kw in (
+            dict(v_transposed=False),
+            dict(buffer_gather=False),
+            dict(kv_lds=True),
+            dict(v_kblock=8),
+            dict(v_prefetch=2),
+            dict(prefetch_v=True),
+            dict(kv_block_size=24),
+        ):
+            cfg = self._cfg(v_paged=True, **{**dict(kv_block_size=16), **kw})
+            with self.assertRaises(ValueError, msg=f"{kw} must raise"):
+                build_wmma_fmha_swapqk(cfg, arch="gfx1151")
+
+    def test_seqlen_k_leaves_the_v_address_but_not_the_loop_bound(self):
+        # This is the whole change: the per-lane V term goes from d_col*seqlen_k
+        # (a runtime multiply up to 2.08 MB) to d_col*block_size (a constant).
+        # But seqlen_k must SURVIVE -- it still bounds the kv loop and feeds the
+        # causal trim. Partial removal is the highest-probability bug here and
+        # it is silent: dropping the bound just reads past the keys.
+        ref = self._lower(self._cfg()).count("%seqlen_k")
+        paged = self._lower(self._cfg(v_paged=True, kv_block_size=16)).count("%seqlen_k")
+        self.assertGreater(ref, 10)
+        self.assertLess(paged, 5, "seqlen_k still reaches the V address")
+        self.assertGreater(paged, 0, "seqlen_k vanished -- the kv loop lost its bound")
+
+    def test_the_gather_keeps_its_two_dwordx4_shape(self):
+        # 33 v4i32 buffer loads, unchanged from the contiguous build. If paging
+        # had demoted V to the row-major path this would collapse to hundreds of
+        # d16 half-loads -- the exact regression that made v_transposed=False a
+        # wash end-to-end.
+        wide = "llvm.amdgcn.raw.ptr.buffer.load.v4i32"
+        narrow = "llvm.amdgcn.raw.ptr.buffer.load.f16"
+        ref = self._lower(self._cfg())
+        self.assertEqual(ref.count(narrow), 0)
+        for bs in (16, 32, 64):
+            ll = self._lower(self._cfg(v_paged=True, kv_block_size=bs))
+            self.assertEqual(ll.count(wide), ref.count(wide), f"bs={bs}")
+            self.assertEqual(ll.count(narrow), 0, f"bs={bs}")
+        # The contrast that gives the numbers above their meaning.
+        self.assertGreater(self._lower(self._cfg(v_transposed=False)).count(narrow), 200)
+
+    def test_block_ids_are_promoted_to_sgpr_so_no_waterfall_is_emitted(self):
+        # An addrspace(1) load is a divergence source, so without the
+        # readfirstlane the backend cannot prove the buffer soffset is
+        # wave-uniform and wraps EVERY V load in a 32-iteration waterfall. That
+        # is invisible in the load COUNT here only because the count is what
+        # this test pins alongside it: the promotion must be present AND the
+        # gather must not have multiplied.
+        #
+        # The budget is exact: +1 per DISTINCT block-table entry the tile spans
+        # (block_n/bs of them, memoised), +2 for the CTA-uniform table row and
+        # bound. Growth past that means a promotion moved inside the K loop.
+        ref = self._lower(self._cfg()).count("readfirstlane")
+        for bs, blocks in ((16, 4), (32, 2), (64, 1), (128, 1)):
+            ll = self._lower(self._cfg(v_paged=True, kv_block_size=bs))
+            self.assertEqual(
+                ll.count("readfirstlane"), ref + blocks + 2, f"bs={bs}"
+            )
+
+    def test_block_table_lookups_are_deduped_to_one_per_distinct_block(self):
+        # block_n=64 spans 64/bs physical blocks, so that is how many lookups a
+        # tile may issue. One per 16-key sub-tile (always 4) would be 4x the
+        # scalar loads at bs=64 for identical addresses.
+        import re
+
+        for bs, expect in ((16, 4), (32, 2), (64, 1), (128, 1)):
+            ll = self._lower(self._cfg(v_paged=True, kv_block_size=bs))
+            n = len(re.findall(r"load i32, ptr addrspace\(1\)", ll))
+            self.assertEqual(n, expect, f"bs={bs}")
+
+    def test_paged_composes_with_k_lds(self):
+        # k_lds is the confirmed ~11% TTFT win; paging V must stack with it, not
+        # replace it. K in LDS, V still on the buffer gather.
+        ll = self._lower(self._cfg(v_paged=True, kv_block_size=16))
+        self.assertIn("addrspace(3)", ll)
+        self.assertIn("llvm.amdgcn.s.barrier", ll)
+        self.assertIn("llvm.amdgcn.raw.ptr.buffer.load.v4i32", ll)
+
+
 class TestSwapQKVRelay(unittest.TestCase):
     """swapqk_transpose_v is the caller's contract for the default layout."""
 
