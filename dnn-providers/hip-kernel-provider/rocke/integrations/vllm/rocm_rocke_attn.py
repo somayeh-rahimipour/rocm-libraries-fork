@@ -111,8 +111,56 @@ _V_TRANSPOSED = os.environ.get("ROCKE_V_TRANSPOSED", "1")
 # paged_v_declined counters in ROCKE_STATS.
 _V_PAGED = os.environ.get("ROCKE_V_PAGED", "1")
 
+# Route decode-only batches to the rocKE paged split-K decode kernel instead of
+# AMD's hand-tuned ops.paged_attention_rocm. OFF by default: the win is
+# conditional, and the condition is not batch size.
+#
+# Kernel-only against the incumbent (Qwen3-8B shape D128/Hq32/Hk8, page 16,
+# arms interleaved in one process, min-of-reps) the result splits exactly on the
+# per-layer KV working set against the 32 MiB MALL:
+#
+#     KV bytes  > 32 MiB (DRAM-bound):     rocKE wins  1.04-1.10x, 12/12 points
+#     KV bytes <= 32 MiB (cache-resident): rocKE loses 0.66-0.80x,  8/8 points
+#
+# with no exceptions -- B=1/Sk=8192, B=4/Sk=2048 and B=8/Sk=1024 are all exactly
+# 33.5 MB and all three lose; one step up in either axis and all three win. In
+# cache the op is latency/ALU-bound, where this kernel's 20 ds_swizzle per key
+# dominate; out of cache it is purely DRAM-bound and the GQA fusion (K/V read
+# once instead of 4x) plus the transposed-V vector gather win. Hence a gate on
+# BYTES rather than on batch.
+_PAGED_DECODE = os.environ.get("ROCKE_PAGED_DECODE", "0")
+
+# Threshold for that gate, in MiB of KV read per layer per step. 0 routes
+# unconditionally.
+#
+# The microbenchmark and the server are not obviously the same experiment: the
+# benchmark re-reads one layer's KV in a tight loop, so a small working set
+# really is MALL-resident, whereas in the server ~16 GB of weights and 35 other
+# layers' KV stream past between one layer's read and its next. If that flushes
+# the MALL then the cache-resident regime does not exist in production and the
+# right threshold is 0. That is an e2e question, which is why it is a knob.
+_PAGED_DECODE_MIN_KV_MIB = int(os.environ.get("ROCKE_PAGED_DECODE_MIN_KV_MIB", "32"))
+
 _ARCH = "gfx1151"
 _KERNEL_CACHE: dict[tuple, object] = {}
+
+_DECODE_OP: bool | None = None
+
+
+def _decode_op_ready() -> bool:
+    """Register ``rocke_gfx1151::paged_decode_splitk`` once; False if it fails."""
+    global _DECODE_OP
+    if _DECODE_OP is None:
+        try:
+            from rocke.instances.gfx1151.paged_decode_splitk import (
+                register_torch_custom_ops,
+            )
+
+            _DECODE_OP = bool(register_torch_custom_ops())
+        except Exception as exc:
+            logger.warning("[RocKE] paged decode op unavailable: %s", exc)
+            _DECODE_OP = False
+    return _DECODE_OP
 
 
 def _pick_strategy(seqlen_k: int) -> tuple[int, bool]:
@@ -151,7 +199,18 @@ def _pick_gqa_fuse(num_query_heads: int, num_kv_heads: int) -> int:
     return f
 
 ROCKE_STATS = {"swapqk": 0, "triton_slice": 0, "fallback": 0, "paged_v": 0,
-               "paged_v_declined": 0}
+               "paged_v_declined": 0, "paged_decode": 0,
+               "paged_decode_declined": 0}
+
+# Which decode gate turned a batch away, keyed by reason. paged_decode_declined
+# says only that something refused; every gate below returns silently into the
+# incumbent, so without this a misrouted config is indistinguishable from a
+# correctly-declined one.
+ROCKE_DECODE_DECLINE: dict[str, int] = {}
+
+
+def _decline(reason: str) -> None:
+    ROCKE_DECODE_DECLINE[reason] = ROCKE_DECODE_DECLINE.get(reason, 0) + 1
 
 import atexit as _atexit
 
@@ -349,6 +408,32 @@ class RockeAttentionImpl(RocmAttentionImpl):
         output_scale=None,
         output_block_scale=None,
     ) -> torch.Tensor:
+        # Checked ahead of the _TRITON_MODE gate on purpose, so that
+        # ROCKE_TRITON_MODE=super + ROCKE_PAGED_DECODE=1 is a clean
+        # incumbent-prefill / rocKE-decode arm that isolates this kernel.
+        if (
+            _PAGED_DECODE == "1"
+            and attn_metadata is not None
+            and attn_metadata.max_query_len == 1
+            and self.attn_type == AttentionType.DECODER
+            and output_scale is None
+            and output_block_scale is None
+            and self.alibi_slopes is None
+            and getattr(self, "sinks", None) is None
+            and self.sliding_window == (-1, -1)
+            and self.kv_cache_dtype in ("auto", "float16")
+            and query.dtype == torch.float16
+            and self.num_kv_heads
+            and self.num_heads % self.num_kv_heads == 0
+            and _decode_op_ready()
+        ):
+            if self._forward_rocke_decode(query, kv_cache, attn_metadata, output):
+                return output
+            # Every rejection inside _forward_rocke_decode is silent -- the
+            # request just goes to the incumbent -- so "the flag was on and
+            # nothing happened" has to be distinguishable from "it worked".
+            ROCKE_STATS["paged_decode_declined"] += 1
+
         if _TRITON_MODE == "super":
             ROCKE_STATS["fallback"] += 1
             return super().forward(
@@ -409,6 +494,115 @@ class RockeAttentionImpl(RocmAttentionImpl):
             output_scale,
             output_block_scale,
         )
+
+    def _paged_decode_caches(self, kv_cache: torch.Tensor):
+        """``(key_cache, value_cache, block_size)`` iff the decode kernel may run.
+
+        Both halves are re-derived from the live tensor rather than trusted from
+        the ``split_kv_cache`` view: the kernel's address math is compiled
+        against K ``[blocks, Hk, D/8, slot, 8]`` and V ``[blocks, Hk, D, slot]``,
+        and a vLLM change to either shape would otherwise mis-address silently
+        instead of failing.
+        """
+        def no(reason):
+            _decline(reason)
+            return None
+
+        if kv_cache is None or kv_cache.numel() == 0:
+            return no("no_kv_cache")
+        try:
+            from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size
+            )
+        except Exception as exc:
+            logger.warning("[RocKE] paged decode cache unavailable: %s", exc)
+            return no("split_kv_cache_raised")
+
+        if key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+            return no(f"cache_dtype={key_cache.dtype}")
+        if key_cache.dim() != 5 or value_cache.dim() != 4:
+            return no(f"cache_ndim={key_cache.dim()}/{value_cache.dim()}")
+        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
+            return no("cache_not_contiguous")
+        _kb, k_hk, d_over_x, k_slots, x = key_cache.shape
+        _vb, v_hk, v_d, block_size = value_cache.shape
+        if x != 8 or d_over_x * x != self.head_size or k_slots != block_size:
+            return no(f"k_shape={tuple(key_cache.shape)}")
+        if k_hk != self.num_kv_heads or v_hk != self.num_kv_heads:
+            return no(f"kv_heads={k_hk}/{v_hk}!={self.num_kv_heads}")
+        if v_d != self.head_size:
+            return no(f"v_head_size={v_d}!={self.head_size}")
+        # A lane owns head_size/32 contiguous d-elements and must not straddle
+        # two x-groups, which is what is_valid_spec enforces as ept | x.
+        ept = self.head_size // 32
+        if self.head_size % 32 or ept not in (1, 2, 4, 8):
+            return no(f"head_size={self.head_size}")
+        # A 16-key tile must not straddle two physical pages.
+        if block_size % 16 or block_size & (block_size - 1):
+            return no(f"block_size={block_size}")
+        # Both caches are indexed with i32 element offsets.
+        for t in (key_cache, value_cache):
+            if t.numel() * t.element_size() >= 2**31:
+                return no("cache_over_2gib")
+        return key_cache, value_cache, block_size
+
+    def _forward_rocke_decode(
+        self,
+        query: torch.Tensor,   # [num_tokens, Hq, D], one token per request
+        kv_cache: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+        output: torch.Tensor,  # [num_tokens, Hq, D]
+    ) -> bool:
+        """rocKE paged split-K decode over the whole batch. False = not taken."""
+        def no(reason):
+            _decline(reason)
+            return False
+
+        caches = self._paged_decode_caches(kv_cache)
+        if caches is None:
+            return False
+        key_cache, value_cache, _block_size = caches
+
+        block_table = attn_metadata.block_table
+        seq_lens = attn_metadata.seq_lens
+        if block_table is None or block_table.dtype != torch.int32:
+            return no(f"block_table={None if block_table is None else block_table.dtype}")
+        if seq_lens is None or seq_lens.dtype != torch.int32:
+            return no(f"seq_lens={None if seq_lens is None else seq_lens.dtype}")
+
+        b = attn_metadata.num_actual_tokens
+        if b <= 0 or b > block_table.shape[0] or b > seq_lens.shape[0]:
+            return no(f"b={b} vs bt={block_table.shape[0]} sl={seq_lens.shape[0]}")
+
+        # KV read per layer per step -- the quantity the MALL boundary is in.
+        # max_seq_len is used rather than the true per-request sum because that
+        # sum lives on the device, and pulling it across would be a D2H stall
+        # per layer per step and is illegal under graph capture anyway. It
+        # over-estimates, so the gate errs toward routing.
+        kv_mib = (
+            b * attn_metadata.max_seq_len * self.num_kv_heads * self.head_size * 4
+        ) / (1024 * 1024)
+        if kv_mib < _PAGED_DECODE_MIN_KV_MIB:
+            return no("below_kv_threshold")
+
+        torch.ops.rocke_gfx1151.paged_decode_splitk(
+            query[:b],
+            key_cache,
+            value_cache,
+            block_table[:b],
+            seq_lens[:b],
+            output[:b],
+            self.scale,
+            0,  # 0 -> the measured choose_num_splits(batch, num_kv_heads)
+        )
+        ROCKE_STATS["paged_decode"] += 1
+        n = ROCKE_STATS["paged_decode"]
+        if n == 1 or n % 3600 == 0:
+            print(f"[RocKE] stats {ROCKE_STATS} decode b={b} kv={kv_mib:.0f}MiB",
+                  flush=True)
+        return True
 
     def _paged_v_cache(self, kv_cache: torch.Tensor):
         """The V half of the paged cache, iff the kernel may gather from it.
