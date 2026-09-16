@@ -55,6 +55,7 @@
 #include <hipblaslt/hipblaslt-ext-op.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 #include <hipblaslt/hipblaslt.h>
+#include <iomanip>
 #include <map>
 #include <numeric>
 #include <omp.h>
@@ -1152,6 +1153,37 @@ void check(hipStream_t                   stream,
                     synchronize(hBias[gemmIdx], dBias[gemmIdx], 0, 0, 0, 0, 1, false, stream));
             }
         }
+        // Check Inf/NaN consistency first so "Inf turned into NaN" bugs fail with a clear message.
+        // Mirror the unit/norm-check buffer branching: pointer-array mode uses per-batch buffers,
+        // so a strided read over num_batches would compare the wrong buffers / go out of bounds.
+        if(arg.unit_check || arg.norm_check)
+        {
+            if(batchMode != HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
+            {
+                check_special_value_consistency(M[gemmIdx],
+                                                N[gemmIdx],
+                                                ldd[gemmIdx],
+                                                stride_d[gemmIdx],
+                                                hD_gold[gemmIdx].buf(),
+                                                hD_1[gemmIdx].buf(),
+                                                num_batches[gemmIdx],
+                                                To);
+            }
+            else
+            {
+                for(int batch = 0; batch < num_batches[gemmIdx]; batch++)
+                {
+                    check_special_value_consistency(M[gemmIdx],
+                                                    N[gemmIdx],
+                                                    ldd[gemmIdx],
+                                                    0,
+                                                    hD_gold[batch].buf(),
+                                                    hD_1[batch].buf(),
+                                                    1,
+                                                    To);
+                }
+            }
+        }
         if(arg.unit_check)
         {
             if(batchMode != HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
@@ -2235,14 +2267,17 @@ void testing_matmul_with_bias(const Arguments& arg,
     gpu_mem_gbytes = static_cast<double>(totalRotatingSizeNeeded) / (1024 * 1024 * 1024);
 
     // Calculating block count
-    int32_t max_iters   = max(arg.cold_iters, arg.iters);
-    int32_t block_count = max(1, min(max_iters, ceil((float)rotating / totalRotatingSizeNeeded)));
+    auto plan = hipblaslt_bench::compute_rotating_buffer_plan(
+        arg.adaptive, arg.max_iters, arg.cold_iters, arg.iters, rotating, totalRotatingSizeNeeded);
+    int32_t block_count = plan.block_count;
     if(rotating > 0)
     {
         hipblaslt_cout << "Rotating buffer " << rotating / (1024 * 1024) << " MiB. "
                        << "Needed Size: " << totalRotatingSizeNeeded / (1024 * 1024) << " MiB. "
-                       << "Needed block count: " << block_count
-                       << " (Capped to max iters: " << max_iters << ")" << std::endl;
+                       << "Needed block count: " << block_count;
+        if(plan.capped)
+            hipblaslt_cout << " (Capped to max iters: " << plan.iter_cap << ")";
+        hipblaslt_cout << std::endl;
     }
     // Calculating block count end
     matmul.resize(block_count, std::vector<hipblasLtMatmulDesc_t>(gemm_count));
@@ -2377,6 +2412,15 @@ void testing_matmul_with_bias(const Arguments& arg,
                     HIPBLASLT_MATMUL_DESC_STREAMK_TILE_SCHEDULING_EXT,
                     &dyn,
                     sizeof(dyn)));
+            }
+            int32_t uso = hipblaslt_bench_options::uniform_summation_order();
+            if(uso >= 0)
+            {
+                CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
+                    matmul[0][i],
+                    HIPBLASLT_MATMUL_DESC_UNIFORM_SUMMATION_ORDER_EXT,
+                    &uso,
+                    sizeof(uso)));
             }
         }
 
@@ -3740,6 +3784,15 @@ void testing_matmul_with_bias(const Arguments& arg,
                         &dyn,
                         sizeof(dyn)));
                 }
+                int32_t uso = hipblaslt_bench_options::uniform_summation_order();
+                if(uso >= 0)
+                {
+                    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
+                        matmul[b][i],
+                        HIPBLASLT_MATMUL_DESC_UNIFORM_SUMMATION_ORDER_EXT,
+                        &uso,
+                        sizeof(uso)));
+                }
             }
 
             if(batchMode != HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
@@ -3822,45 +3875,30 @@ void testing_matmul_with_bias(const Arguments& arg,
     // as batch_count for reusing existing GroupedGEMM code for General Batched GEMM
     batchMode == HIPBLASLT_BATCH_MODE_POINTER_ARRAY ? gemm_count = arg.batch_count : gemm_count;
     // C to Cpp API for GG
-    std::vector<std::vector<void*>> da(block_count, std::vector<void*>(gemm_count));
-    std::vector<std::vector<void*>> db(block_count, std::vector<void*>(gemm_count));
-    std::vector<std::vector<void*>> dc(block_count, std::vector<void*>(gemm_count));
-    std::vector<std::vector<void*>> dd(block_count, std::vector<void*>(gemm_count));
-
-    std::vector<std::vector<uint64_t*>> da1(block_count, std::vector<uint64_t*>(gemm_count));
-    std::vector<std::vector<uint64_t*>> db1(block_count, std::vector<uint64_t*>(gemm_count));
-    std::vector<std::vector<uint64_t*>> dc1(block_count, std::vector<uint64_t*>(gemm_count));
-    std::vector<std::vector<uint64_t*>> dd1(block_count, std::vector<uint64_t*>(gemm_count));
+    const auto groupedGemmBlockCount = do_grouped_gemm ? block_count : 0;
+    std::vector<std::vector<void*>> da(groupedGemmBlockCount, std::vector<void*>(gemm_count));
+    std::vector<std::vector<void*>> db(groupedGemmBlockCount, std::vector<void*>(gemm_count));
+    std::vector<std::vector<void*>> dc(groupedGemmBlockCount, std::vector<void*>(gemm_count));
+    std::vector<std::vector<void*>> dd(groupedGemmBlockCount, std::vector<void*>(gemm_count)); 
 
     std::vector<uint64_t*> dda, ddb, ddc, ddd;
-    std::vector<uint64_t*> hha, hhb, hhc, hhd;
-
-    for(int i = 0; i < block_count; i++)
+    if(batchMode == HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
     {
-        uint64_t* ptr = nullptr;
-        CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        dda.push_back(ptr);
+        for(int i = 0; i < block_count; i++)
+        {
+            uint64_t* ptr = nullptr;
+            CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
+            dda.push_back(ptr);
 
-        CHECK_HIP_ERROR(hipHostMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        hha.push_back(ptr);
+            CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
+            ddb.push_back(ptr);
 
-        CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        ddb.push_back(ptr);
+            CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
+            ddc.push_back(ptr);
 
-        CHECK_HIP_ERROR(hipHostMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        hhb.push_back(ptr);
-
-        CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        ddc.push_back(ptr);
-
-        CHECK_HIP_ERROR(hipHostMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        hhc.push_back(ptr);
-
-        CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        ddd.push_back(ptr);
-
-        CHECK_HIP_ERROR(hipHostMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
-        hhd.push_back(ptr);
+            CHECK_HIP_ERROR(hipMalloc(&ptr, gemm_count * sizeof(uint64_t*)));
+            ddd.push_back(ptr);
+        }
     }
 
     for(int32_t b = 0; b < block_count; b++)
@@ -4012,37 +4050,30 @@ void testing_matmul_with_bias(const Arguments& arg,
             }
         }
     }
-    else
+    else if(batchMode == HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
     {
-        for(int gemmIdx = 0; gemmIdx < gemm_count; gemmIdx++)
-        {
-            for(int32_t b = 0; b < block_count; b++)
-            {
-                da1[b][gemmIdx] = reinterpret_cast<uint64_t*>(
-                    (dA[gemmIdx].as<char>()) + b * size_dA[0] * realDataTypeSize(TiA));
-                db1[b][gemmIdx] = reinterpret_cast<uint64_t*>(
-                    (dB[gemmIdx].as<char>()) + b * size_dB[0] * realDataTypeSize(TiB));
-                dc1[b][gemmIdx] = reinterpret_cast<uint64_t*>(
-                    (dC[gemmIdx].as<char>()) + b * size_C[0] * realDataTypeSize(To));
-                dd1[b][gemmIdx] = reinterpret_cast<uint64_t*>(
-                    (*dDp)[gemmIdx].as<char>() + b * size_D[0] * realDataTypeSize(To));
-            }
-        }
-    }
-
-    if(batchMode == HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
-    {
-        //Copy The pointer arrays to Device [General Batched GEMM]
+        std::vector<uint64_t*> da1(gemm_count), db1(gemm_count), dc1(gemm_count), dd1(gemm_count);
         for(int32_t b = 0; b < block_count; b++)
         {
+            for(int gemmIdx = 0; gemmIdx < gemm_count; gemmIdx++)
+            {
+                da1[gemmIdx] = reinterpret_cast<uint64_t*>(
+                    (dA[gemmIdx].as<char>()) + b * size_dA[0] * realDataTypeSize(TiA));
+                db1[gemmIdx] = reinterpret_cast<uint64_t*>(
+                    (dB[gemmIdx].as<char>()) + b * size_dB[0] * realDataTypeSize(TiB));
+                dc1[gemmIdx] = reinterpret_cast<uint64_t*>(
+                    (dC[gemmIdx].as<char>()) + b * size_C[0] * realDataTypeSize(To));
+                dd1[gemmIdx] = reinterpret_cast<uint64_t*>(
+                    (*dDp)[gemmIdx].as<char>() + b * size_D[0] * realDataTypeSize(To));
+            }
             CHECK_HIP_ERROR(hipMemcpy(
-                dda[b], da1[b].data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
+                dda[b], da1.data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
             CHECK_HIP_ERROR(hipMemcpy(
-                ddb[b], db1[b].data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
+                ddb[b], db1.data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
             CHECK_HIP_ERROR(hipMemcpy(
-                ddc[b], dc1[b].data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
+                ddc[b], dc1.data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
             CHECK_HIP_ERROR(hipMemcpy(
-                ddd[b], dd1[b].data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
+                ddd[b], dd1.data(), gemm_count * sizeof(uint64_t*), hipMemcpyHostToDevice));
         }
     }
 
@@ -4834,6 +4865,22 @@ void testing_matmul_with_bias(const Arguments& arg,
 
     auto ptrs = benchmark_allocation();
 
+    if(arg.adaptive)
+    {
+        hipblaslt_bench::TimingConfig cfg;
+        cfg.warmup_time         = arg.warmup_time;
+        cfg.sample_time         = arg.sample_time;
+        cfg.measure_time        = arg.measure_time;
+        cfg.max_measure_time    = arg.max_measure_time;
+        cfg.min_iters           = arg.min_iters;
+        cfg.max_iters           = arg.max_iters;
+        cfg.noise_threshold     = arg.noise_threshold;
+        cfg.stability_threshold = arg.stability_threshold;
+        cfg.stability_window    = arg.stability_window;
+        cfg.stability_interval  = arg.stability_interval;
+        hipblaslt_cout << hipblaslt_bench::format_adaptive_timing_summary(cfg) << std::endl;
+    }
+
     if(arg.print_solution_found)
         hipblaslt_cout << "Is supported " << heuristicResult.size()
                        << " / Total solutions: " << returnedAlgoCount * tuningVec.size()
@@ -5401,8 +5448,7 @@ void testing_matmul_with_bias(const Arguments& arg,
             {
                 // Gaussian-filled inputs + batched GEMM: use near_check like fp16_accumulator_probe
                 // (CPU ref vs GPU are not always bit-identical for f32/f16 accumulations).
-                for(int gemmIdx = 0; gemmIdx < gemm_count; gemmIdx++)
-                    tol[gemmIdx] = 1e-2;
+                std::fill(tol.begin(), tol.end(), 1e-2);
             }
 
             if(arg.unit_check || arg.norm_check || arg.allclose_check)
@@ -5551,6 +5597,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                 flush_time_used = flush_times_cache[device_uuid];
             }
         }
+        timingCfg.flush_us = flush_time_used;
 
         for(size_t sol = 0; sol < heuristicResult.size(); sol++)
         {
@@ -5830,9 +5877,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                         timing,
                         timingAbort);
                 }
-                // gpu time is reported per hot call; log_perf divides by hot_calls,
-                // so scale the mean back up to a total here.
-                gpu_time_used = timing.median_us * (number_hot_calls < 1 ? 1 : number_hot_calls);
+                gpu_time_used = timing.median_us;
                 perf_monitor->stop();
             }
             else
@@ -5901,8 +5946,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                         stream,
                         timing,
                         timingAbort);
-                    gpu_time_used
-                        = timing.median_us * (number_hot_calls < 1 ? 1 : number_hot_calls);
+                    gpu_time_used = timing.median_us;
                     perf_monitor->stop();
                 }
                 else
@@ -5960,8 +6004,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                         stream,
                         timing,
                         timingAbort);
-                    gpu_time_used
-                        = timing.median_us * (number_hot_calls < 1 ? 1 : number_hot_calls);
+                    gpu_time_used = timing.median_us;
                     perf_monitor->stop();
                 }
             }
@@ -6019,8 +6062,7 @@ void testing_matmul_with_bias(const Arguments& arg,
             }
             else if(arg.initialization == hipblaslt_initialization::norm_dist_one_special)
             {
-                for(int gemmIdx = 0; gemmIdx < gemm_count; gemmIdx++)
-                    tol[gemmIdx] = 1e-2;
+                std::fill(tol.begin(), tol.end(), 1e-2);
             }
             if(arg.unit_check || arg.norm_check || arg.allclose_check)
             {
@@ -6140,7 +6182,6 @@ void testing_matmul_with_bias(const Arguments& arg,
                     (uint32_t)tuningVec[heuristicTuningIndex[sol]].getSplitK(),
                     (uint32_t)tuningVec[heuristicTuningIndex[sol]].getWgm(),
                     gpu_time_used,
-                    flush_time_used,
                     flops,
                     gpu_mem_gbytes,
                     cpu_time_used,
@@ -6204,7 +6245,6 @@ void testing_matmul_with_bias(const Arguments& arg,
                 (uint32_t)tuningVec[heuristicTuningIndex[best_sol]].getSplitK(),
                 (uint32_t)tuningVec[heuristicTuningIndex[best_sol]].getWgm(),
                 best_gpu_time,
-                flush_time_used,
                 best_flops,
                 gpu_mem_gbytes,
                 cpu_time_used,
@@ -6223,16 +6263,15 @@ void testing_matmul_with_bias(const Arguments& arg,
     }
 
     //Freeing the device memory allocated for the General Batched GEMM Pointer Arrays
-    for(int i = 0; i < block_count; i++)
+    if(batchMode == HIPBLASLT_BATCH_MODE_POINTER_ARRAY)
     {
-        CHECK_HIP_ERROR(hipFree(dda[i]));
-        CHECK_HIP_ERROR(hipFree(ddb[i]));
-        CHECK_HIP_ERROR(hipFree(ddc[i]));
-        CHECK_HIP_ERROR(hipFree(ddd[i]));
-        CHECK_HIP_ERROR(hipFreeHost(hha[i]));
-        CHECK_HIP_ERROR(hipFreeHost(hhb[i]));
-        CHECK_HIP_ERROR(hipFreeHost(hhc[i]));
-        CHECK_HIP_ERROR(hipFreeHost(hhd[i]));
+        for(int i = 0; i < block_count; i++)
+        {
+            CHECK_HIP_ERROR(hipFree(dda[i]));
+            CHECK_HIP_ERROR(hipFree(ddb[i]));
+            CHECK_HIP_ERROR(hipFree(ddc[i]));
+            CHECK_HIP_ERROR(hipFree(ddd[i]));
+        }
     }
 
     if(dWorkspace != nullptr)

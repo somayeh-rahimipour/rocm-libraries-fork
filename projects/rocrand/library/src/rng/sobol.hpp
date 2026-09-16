@@ -128,11 +128,11 @@ template<unsigned int OutputPerThread,
 struct generate_sobol_host
 {
     template<host::target_arch Arch = host::target_arch::unknown>
-    static void generate(dim3                     block_idx,
-                         dim3                     thread_idx,
-                         dim3                     grid_dim,
-                         dim3                     block_dim,
-                         T*                       data,
+    static void generate(dim3 block_idx,
+                         dim3 thread_idx,
+                         dim3 grid_dim,
+                         dim3 block_dim,
+                         T* __restrict__ data,
                          const size_t             n,
                          const Constant*          direction_vectors,
                          const Constant*          scramble_constants,
@@ -374,22 +374,22 @@ private:
         {
             if constexpr(Scrambled)
             {
-                return rocrand_h_scrambled_sobol64_direction_vectors;
+                return rocrand_device::detail::rocrand_h_scrambled_sobol64_direction_vectors;
             }
             else
             {
-                return rocrand_h_sobol64_direction_vectors;
+                return rocrand_device::detail::rocrand_h_sobol64_direction_vectors;
             }
         }
         else
         {
             if constexpr(Scrambled)
             {
-                return rocrand_h_scrambled_sobol32_direction_vectors;
+                return rocrand_device::detail::rocrand_h_scrambled_sobol32_direction_vectors;
             }
             else
             {
-                return rocrand_h_sobol32_direction_vectors;
+                return rocrand_device::detail::rocrand_h_sobol32_direction_vectors;
             }
         }
 #pragma clang diagnostic pop
@@ -435,11 +435,11 @@ private:
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if constexpr(Is64)
         {
-            return h_scrambled_sobol64_constants;
+            return rocrand_device::detail::h_scrambled_sobol64_constants;
         }
         else
         {
-            return h_scrambled_sobol32_constants;
+            return rocrand_device::detail::h_scrambled_sobol32_constants;
         }
 #pragma clang diagnostic pop
     }
