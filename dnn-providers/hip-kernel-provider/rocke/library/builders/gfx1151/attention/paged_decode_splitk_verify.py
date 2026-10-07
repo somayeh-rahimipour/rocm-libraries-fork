@@ -147,7 +147,20 @@ def _run_case(torch, args, B, Sk, num_splits, *, verbose=True):
 
     def launch():
         torch.ops.rocke_gfx1151.paged_decode_splitk(
-            Q, k_cache, v_cache, block_table, seq_lens_d, out, scale, num_splits
+            Q,
+            k_cache,
+            v_cache,
+            block_table,
+            seq_lens_d,
+            out,
+            scale,
+            num_splits,
+            args.d_lanes,
+            args.block_n,
+            args.unroll,
+            args.heads_per_cta,
+            args.waves_per_eu,
+            args.reduce_unroll,
         )
 
     launch()
@@ -193,6 +206,12 @@ def main() -> int:
         help="scatter pages non-contiguously (default on: an identity table "
         "lets a kernel that ignores the block table still PASS)",
     )
+    p.add_argument("--d-lanes", type=int, default=0, help="0 -> default (16)")
+    p.add_argument("--block-n", type=int, default=0, help="0 -> derived from d-lanes")
+    p.add_argument("--unroll", type=int, default=1, help="kv blocks per loop iteration")
+    p.add_argument("--heads-per-cta", type=int, default=0, help="0 -> full GQA fusion")
+    p.add_argument("--waves-per-eu", type=int, default=0, help="0 -> no hint")
+    p.add_argument("--reduce-unroll", type=int, default=0, choices=(0, 1))
     p.add_argument("--tol", type=float, default=2e-2)
     p.add_argument("--bench", action="store_true")
     p.add_argument("--warmup", type=int, default=10)

@@ -17,6 +17,16 @@ torch custom op over vLLM's paged KV cache::
     scale       : float  (1/sqrt(D)); converted to log2 space here
     num_splits  : int    (0 -> :func:`choose_num_splits`)
 
+Optional tuning knobs, each selecting a different compiled kernel (0 / default
+means "the shipped choice"); see ``PagedDecodeCfg`` for what each trades::
+
+    d_lanes        : int  lanes per QK dot (0 -> ROCKE_PAGED_DECODE_DLANES or 16)
+    block_n        : int  tokens per V vector load (0 -> derived from d_lanes)
+    unroll         : int  kv blocks per loop iteration (1)
+    heads_per_cta  : int  Q heads per CTA (0 -> the whole GQA ratio)
+    waves_per_eu   : int  occupancy hint for the segment kernel (0 -> none)
+    reduce_unroll  : int  1 -> straight-line reduce over the splits (0)
+
 Two launches on the caller's stream: the segment kernel writes unnormalised
 ``(m, l, acc)`` per split into an f32 workspace, the reduce kernel merges them
 into ``out``.
@@ -39,7 +49,9 @@ _OP_NAME = "paged_decode_splitk"
 _FULL_NAME = f"{_NAMESPACE}::{_OP_NAME}"
 _SCHEMA = (
     f"{_OP_NAME}(Tensor q, Tensor k_cache, Tensor v_cache, Tensor block_table, "
-    "Tensor seq_lens, Tensor(a!) out, float scale, int num_splits) -> ()"
+    "Tensor seq_lens, Tensor(a!) out, float scale, int num_splits, "
+    "int d_lanes=0, int block_n=0, int unroll=1, int heads_per_cta=0, "
+    "int waves_per_eu=0, int reduce_unroll=0) -> ()"
 )
 _ARCH = "gfx1151"
 
@@ -50,7 +62,7 @@ _ARCH = "gfx1151"
 D_LANES = int(os.environ.get("ROCKE_PAGED_DECODE_DLANES", "16"))
 
 # (head_size, num_q_heads, num_kv_heads, dtype, kv_block_size, num_splits,
-#  d_lanes)
+#  d_lanes, block_n, unroll, heads_per_cta, waves_per_eu, reduce_unroll)
 _KERNEL_CACHE: dict[tuple, Any] = {}
 
 # (device_index, batch, num_kv_heads, num_splits, gqa_fuse, head_size)
@@ -83,6 +95,11 @@ def _get_launcher(
     kv_block_size: int,
     num_splits: int,
     d_lanes: int,
+    block_n: int = 0,
+    unroll: int = 1,
+    heads_per_cta: int = 0,
+    waves_per_eu: int = 0,
+    reduce_unroll: int = 0,
 ):
     """Compile+cache the (segment, reduce) pair for one config."""
     key = (
@@ -93,6 +110,11 @@ def _get_launcher(
         kv_block_size,
         num_splits,
         d_lanes,
+        block_n,
+        unroll,
+        heads_per_cta,
+        waves_per_eu,
+        reduce_unroll,
     )
     hit = _KERNEL_CACHE.get(key)
     if hit is not None:
@@ -108,7 +130,7 @@ def _get_launcher(
     from rocke.runtime.hip_module import Runtime
 
     # block_n is the V vector-load width and must stay inside one key
-    # partition, so it follows d_lanes rather than being tuned separately.
+    # partition, so unless chosen explicitly it follows d_lanes.
     keys_per_sub = kv_block_size // (32 // d_lanes)
     cfg = PagedDecodeCfg(
         head_size=head_size,
@@ -118,7 +140,11 @@ def _get_launcher(
         kv_block_size=kv_block_size,
         num_splits=num_splits,
         d_lanes=d_lanes,
-        block_n=min(8, keys_per_sub),
+        block_n=block_n or min(8, keys_per_sub),
+        unroll=unroll,
+        heads_per_cta=heads_per_cta,
+        waves_per_eu=waves_per_eu,
+        reduce_unroll=reduce_unroll,
     )
     ok, why = is_valid_spec(cfg, _ARCH)
     if not ok:
@@ -173,7 +199,22 @@ def _get_workspace(cfg, batch: int, device):
     return entry
 
 
-def _launch(q, k_cache, v_cache, block_table, seq_lens, out, scale, num_splits) -> None:
+def _launch(
+    q,
+    k_cache,
+    v_cache,
+    block_table,
+    seq_lens,
+    out,
+    scale,
+    num_splits,
+    d_lanes=0,
+    block_n=0,
+    unroll=1,
+    heads_per_cta=0,
+    waves_per_eu=0,
+    reduce_unroll=0,
+) -> None:
     from kernels.gfx1151.paged_decode_splitk import (
         WAVE,
         choose_num_splits,
@@ -210,7 +251,18 @@ def _launch(q, k_cache, v_cache, block_table, seq_lens, out, scale, num_splits) 
         num_splits = choose_num_splits(B, Hk)
 
     cfg, rt, seg_fn, red_fn, _seg_mod, _red_mod = _get_launcher(
-        D, Hq, Hk, dtype, kv_block_size, num_splits, D_LANES
+        D,
+        Hq,
+        Hk,
+        dtype,
+        kv_block_size,
+        num_splits,
+        d_lanes or D_LANES,
+        block_n,
+        unroll,
+        heads_per_cta,
+        waves_per_eu,
+        reduce_unroll,
     )
     ws_m, ws_l, ws_acc = _get_workspace(cfg, B, q.device)
 
@@ -285,14 +337,55 @@ def _buf(packed: bytes):
 
 
 def paged_decode_splitk_impl(
-    q, k_cache, v_cache, block_table, seq_lens, out, scale: float, num_splits: int
+    q,
+    k_cache,
+    v_cache,
+    block_table,
+    seq_lens,
+    out,
+    scale: float,
+    num_splits: int,
+    d_lanes: int = 0,
+    block_n: int = 0,
+    unroll: int = 1,
+    heads_per_cta: int = 0,
+    waves_per_eu: int = 0,
+    reduce_unroll: int = 0,
 ) -> None:
     """GPU implementation of rocke_gfx1151::paged_decode_splitk."""
-    _launch(q, k_cache, v_cache, block_table, seq_lens, out, scale, num_splits)
+    _launch(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens,
+        out,
+        scale,
+        num_splits,
+        d_lanes,
+        block_n,
+        unroll,
+        heads_per_cta,
+        waves_per_eu,
+        reduce_unroll,
+    )
 
 
 def paged_decode_splitk_meta(
-    q, k_cache, v_cache, block_table, seq_lens, out, scale: float, num_splits: int
+    q,
+    k_cache,
+    v_cache,
+    block_table,
+    seq_lens,
+    out,
+    scale: float,
+    num_splits: int,
+    d_lanes: int = 0,
+    block_n: int = 0,
+    unroll: int = 1,
+    heads_per_cta: int = 0,
+    waves_per_eu: int = 0,
+    reduce_unroll: int = 0,
 ) -> None:
     """Shape-only meta implementation (no GPU, used by torch.compile tracing)."""
     return None

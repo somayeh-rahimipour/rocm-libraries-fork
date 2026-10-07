@@ -107,13 +107,37 @@ class PagedDecodeCfg:
     # DRAM-bound win rests on. The optimum being interior is why this is a knob
     # and not a constant.
     d_lanes: int = 16
+    # Block-loop unroll: physical kv blocks consumed per loop iteration. All U
+    # block-table lookups are issued ahead of the first block's math, and the
+    # tail is masked, so any U is correct for any block count. Costs code size
+    # and live registers, buys memory-level parallelism per wave.
+    unroll: int = 1
+    # Q heads per CTA. 0 means the full GQA ratio (K/V read once). A divisor of
+    # the ratio splits the fusion: the grid grows by gqa_fuse/heads_per_cta, each
+    # CTA carries proportionally fewer accumulator VGPRs (more waves per SIMD),
+    # and K/V are re-read once per head group (L2/MALL hits at best).
+    heads_per_cta: int = 0
+    # ``amdgpu-waves-per-eu`` occupancy hint for the segment kernel; 0 = none.
+    waves_per_eu: int = 0
+    # 0: the reduce walks the splits in three scf loops. 1: all splits are
+    # unrolled straight-line so every workspace load is issued up front.
+    reduce_unroll: int = 0
     name: str = "rocke_paged_decode_splitk"
 
     @property
     def gqa_fuse(self) -> int:
-        """Q heads served by one CTA. Equals the GQA ratio -- the fusion is
-        total, which is what makes K/V read-once."""
+        """Q heads of one kv head: the GQA ratio."""
         return self.num_q_heads // self.num_kv_heads
+
+    @property
+    def heads_eff(self) -> int:
+        """Q heads actually served by one segment CTA."""
+        return self.heads_per_cta or self.gqa_fuse
+
+    @property
+    def head_groups(self) -> int:
+        """Segment CTAs per (request, kv_head, split) along the head axis."""
+        return self.gqa_fuse // self.heads_eff
 
     @property
     def key_subs(self) -> int:
@@ -146,6 +170,17 @@ class PagedDecodeCfg:
         return 8
 
     def kernel_name(self, phase: str) -> str:
+        # Non-default knobs only, so default-config kernel names are unchanged.
+        extra = []
+        if phase == "seg":
+            if self.unroll != 1:
+                extra.append(f"U{self.unroll}")
+            if self.heads_eff != self.gqa_fuse:
+                extra.append(f"HC{self.heads_eff}")
+            if self.waves_per_eu:
+                extra.append(f"WE{self.waves_per_eu}")
+        elif self.reduce_unroll:
+            extra.append("RU")
         return kernel_name_join(
             self.name,
             phase,
@@ -157,6 +192,7 @@ class PagedDecodeCfg:
             f"BN{self.block_n}",
             f"DL{self.d_lanes}",
             f"S{self.num_splits}",
+            *extra,
         )
 
 
@@ -236,6 +272,19 @@ def is_valid_spec(cfg: PagedDecodeCfg, arch: str = "gfx1151") -> Tuple[bool, str
             f"(= kv_block_size {cfg.kv_block_size} / key_subs {cfg.key_subs}) so a "
             "sub-tile stays inside one key partition of one physical block"
         )
+    if cfg.unroll not in (1, 2, 4, 8):
+        return False, f"unroll {cfg.unroll} must be one of (1, 2, 4, 8)"
+    if cfg.heads_per_cta < 0 or cfg.gqa_fuse % cfg.heads_eff != 0:
+        return False, (
+            f"heads_per_cta {cfg.heads_per_cta} must be 0 (= full) or divide the "
+            f"GQA ratio {cfg.gqa_fuse}"
+        )
+    if not 0 <= cfg.waves_per_eu <= 16:
+        return False, f"waves_per_eu {cfg.waves_per_eu} must be in [0, 16]"
+    if cfg.reduce_unroll not in (0, 1):
+        return False, f"reduce_unroll {cfg.reduce_unroll} must be 0 or 1"
+    if cfg.reduce_unroll and cfg.num_splits > 64:
+        return False, "reduce_unroll=1 unrolls every split; num_splits must be <= 64"
     return True, "ok"
 
 
@@ -307,7 +356,10 @@ def build_paged_decode_splitk_segment(
     BS = cfg.kv_block_size
     BN = cfg.block_n
     HK = cfg.num_kv_heads
-    GF = cfg.gqa_fuse
+    GF = cfg.heads_eff  # Q heads in this CTA
+    GFT = cfg.gqa_fuse  # Q heads per kv head (workspace / Q layout)
+    HG = cfg.head_groups
+    U = cfg.unroll
     EPT = cfg.ept
     X = cfg.x
     NS = cfg.num_splits
@@ -320,6 +372,8 @@ def build_paged_decode_splitk_segment(
 
     b = IRBuilder(cfg.kernel_name("seg"))
     b.kernel.attrs["max_workgroup_size"] = WAVE
+    if cfg.waves_per_eu:
+        b.kernel.attrs["waves_per_eu"] = cfg.waves_per_eu
     p = _declare_segment_params(b, cfg)
 
     c0 = b.const_i32(0)
@@ -329,7 +383,15 @@ def build_paged_decode_splitk_segment(
     neg_inf = b.const_f32(float("-inf"))
 
     seq_idx = b.block_id_x()
-    kv_head = b.block_id_y()
+    grid_y = b.block_id_y()
+    if HG == 1:
+        kv_head = grid_y
+        head0 = None
+    else:
+        # Grid y enumerates (kv_head, head group): head groups of one kv head
+        # are adjacent, so they launch together and share K/V through L2.
+        kv_head = b.div(grid_y, b.const_i32(HG))
+        head0 = b.mul(b.mod(grid_y, b.const_i32(HG)), b.const_i32(GF))
     seg_idx = b.block_id_z()
     tid = b.thread_id_x()
 
@@ -402,9 +464,12 @@ def build_paged_decode_splitk_segment(
     scale_log2 = p["scale_log2"]
 
     # ---- Q: one vector load per fused head, resident in registers ----
+    q_head0 = b.mul(kv_head, b.const_i32(GFT))
+    if head0 is not None:
+        q_head0 = b.add(q_head0, head0)
     q_row_base = b.add(
         b.mul(seq_idx, p["stride_q_seq"]),
-        b.mul(b.mul(kv_head, b.const_i32(GF)), p["stride_q_head"]),
+        b.mul(q_head0, p["stride_q_head"]),
     )
     q_widths = _chunk_widths(EPT)
     q_lane = []
@@ -427,31 +492,17 @@ def build_paged_decode_splitk_segment(
     for g in range(GF):
         iter_args += [(f"a{g}_{k}", zero_f) for k in range(EPT)]
 
-    loop = b.scf_for_iter(blk_start, blk_end, c1, iter_args=iter_args, iv_name="blk")
-    with loop as (blk, st):
-        m = list(st[0:GF])
-        l = list(st[GF : 2 * GF])  # noqa: E741 - online-softmax denominator
-        acc = [list(st[2 * GF + g * EPT : 2 * GF + (g + 1) * EPT]) for g in range(GF)]
+    # Keys at or past this bound are masked. With U > 1 the last iteration can
+    # step past blk_end into the NEXT split's blocks, whose keys are < seqlen_k
+    # and would otherwise be counted twice.
+    key_limit = (
+        seqlen_k
+        if U == 1
+        else b.smin(seqlen_k, b.shl(blk_end, b.const_i32(bs_log2)))
+    )
 
-        bt_idx = b.add(bt_row, blk)
-        raw_blk = b.masked_global_load(
-            p["BlockTable"],
-            bt_idx,
-            b.cmp_lt(bt_idx, bt_max),
-            c0,  # block 0 is always a valid page
-            I32,
-            align=4,
-        )
-        # to_sgpr_u32 on the RAW block id is not an optimisation. The id comes
-        # from an addrspace(1) load, which AMDGPU treats as divergent, so
-        # without the promotion every K and V gather in this loop gets wrapped
-        # in a 32-iteration waterfall. Promote first, scale after, so the
-        # multiply-add lands on the SALU and the gathers keep a uniform base.
-        phys = b.to_sgpr_u32(raw_blk)
-        cache_base = b.add(b.mul(phys, blk_scale), kv_head_off)
-        key0 = b.shl(blk, b.const_i32(bs_log2))
-        key_base = key0 if KSUB == 1 else b.add(key0, sub_slot)
-
+    def _block(m, l, acc, cache_base, key_base):  # noqa: E741
+        """Online-softmax update over one physical kv block."""
         for sub in range(KPS // BN):
             tok0 = sub * BN
 
@@ -483,7 +534,7 @@ def build_paged_decode_splitk_segment(
                 # SCORE (not K): an out-of-range slot holds stale cache bytes
                 # that may be inf/NaN, and zeroing K would still give it
                 # softmax weight exp2(0 - m) against a garbage V.
-                valid = b.cmp_lt(b.add(key_base, b.const_i32(tok0 + t)), seqlen_k)
+                valid = b.cmp_lt(b.add(key_base, b.const_i32(tok0 + t)), key_limit)
                 for g in range(GF):
                     partial = zero_f
                     for k in range(EPT):
@@ -534,6 +585,52 @@ def build_paged_decode_splitk_segment(
                 acc_new.append(row)
 
             m, l, acc = m_new, l_new, acc_new
+        return m, l, acc
+
+    loop = b.scf_for_iter(
+        blk_start,
+        blk_end,
+        c1 if U == 1 else b.const_i32(U),
+        iter_args=iter_args,
+        iv_name="blk",
+    )
+    with loop as (blk, st):
+        m = list(st[0:GF])
+        l = list(st[GF : 2 * GF])  # noqa: E741 - online-softmax denominator
+        acc = [list(st[2 * GF + g * EPT : 2 * GF + (g + 1) * EPT]) for g in range(GF)]
+
+        # Every block-table lookup of the iteration is issued before the first
+        # block's math. Blocks past blk_end (unroll tail) read page 0 -- always
+        # a valid page -- and are masked out through key_limit.
+        bases = []
+        for u in range(U):
+            blk_u = blk if u == 0 else b.add(blk, b.const_i32(u))
+            bt_idx = b.add(bt_row, blk_u)
+            in_table = b.cmp_lt(bt_idx, bt_max)
+            if U > 1:
+                in_table = b.land(in_table, b.cmp_lt(blk_u, blk_end))
+            raw_blk = b.masked_global_load(
+                p["BlockTable"],
+                bt_idx,
+                in_table,
+                c0,  # block 0 is always a valid page
+                I32,
+                align=4,
+            )
+            # to_sgpr_u32 on the RAW block id is not an optimisation. The id
+            # comes from an addrspace(1) load, which AMDGPU treats as divergent,
+            # so without the promotion every K and V gather in this loop gets
+            # wrapped in a 32-iteration waterfall. Promote first, scale after,
+            # so the multiply-add lands on the SALU and the gathers keep a
+            # uniform base.
+            phys = b.to_sgpr_u32(raw_blk)
+            cache_base = b.add(b.mul(phys, blk_scale), kv_head_off)
+            key0 = b.shl(blk_u, b.const_i32(bs_log2))
+            key_base = key0 if KSUB == 1 else b.add(key0, sub_slot)
+            bases.append((cache_base, key_base))
+
+        for cache_base, key_base in bases:
+            m, l, acc = _block(m, l, acc, cache_base, key_base)
 
         b.scf_yield(*(m + l + [v for row in acc for v in row]))
 
@@ -574,8 +671,10 @@ def build_paged_decode_splitk_segment(
             b.mul(b.add(b.mul(seq_idx, b.const_i32(HK)), kv_head), b.const_i32(NS)),
             seg_idx,
         ),
-        b.const_i32(GF),
+        b.const_i32(GFT),
     )
+    if head0 is not None:
+        unit = b.add(unit, head0)
     is_lead = b.cmp_eq(tid, c0)
     with b.scf_if(is_lead):
         for g in range(GF):
@@ -657,8 +756,57 @@ def build_paged_decode_splitk_reduce(
         b.mul(b.mul(kv_head, b.const_i32(GF)), p["stride_o_head"]),
     )
 
+    def _store(g: int, out: List[Value]) -> None:
+        o_row = b.add(o_row_base, b.mul(b.const_i32(g), p["stride_o_head"]))
+        b.global_store_vN(
+            p["O"],
+            b.add(o_row, d0),
+            pack_f32_to(b, out, dtype=cfg.dtype),
+            EPT,
+            align=EPT * 2,
+        )
+
     for g in range(GF):
         slot0 = b.add(base_unit, b.const_i32(g))
+
+        if cfg.reduce_unroll:
+            # Straight-line over the splits: every m, l and acc load is
+            # independent, so all of them are in flight before the first
+            # dependent exp2. The same guards as the loop form discard an
+            # empty split's -1e30 sentinel.
+            slots = [b.add(slot0, b.const_i32(s * GF)) for s in range(NS)]
+            ms = [b.global_load_f32(p["ws_m"], sl) for sl in slots]
+            ls = [b.global_load_f32(p["ws_l"], sl) for sl in slots]
+            parts = [
+                b.global_load_vN(
+                    p["ws_acc"],
+                    b.add(b.mul(sl, b.const_i32(D)), d0),
+                    F32,
+                    EPT,
+                    align=EPT * 4,
+                )
+                for sl in slots
+            ]
+            overall_max = neg_big
+            for mv in ms:
+                overall_max = b.fmax(overall_max, mv)
+            factors = [
+                b.select(
+                    b.fcmp("ogt", mv, neg_big),
+                    b.exp2(b.fsub(mv, overall_max)),
+                    zero_f,
+                )
+                for mv in ms
+            ]
+            den = zero_f
+            for lv, fv in zip(ls, factors):
+                den = b.fadd(den, b.fmul(lv, fv))
+            inv_l = b.select(b.fcmp("oeq", den, zero_f), zero_f, b.rcp(den))
+            row = [zero_f] * EPT
+            for part, fv in zip(parts, factors):
+                row = [b.fma(b.vec_extract(part, k), fv, row[k]) for k in range(EPT)]
+            _store(g, [b.fmul(row[k], inv_l) for k in range(EPT)])
+            continue
 
         def _slot(sv: Value) -> Value:
             return b.add(slot0, b.mul(sv, split_stride))
@@ -715,15 +863,7 @@ def build_paged_decode_splitk_reduce(
                 ]
             )
 
-        out = [b.fmul(acc_loop.results[k], inv_l) for k in range(EPT)]
-        o_row = b.add(o_row_base, b.mul(b.const_i32(g), p["stride_o_head"]))
-        b.global_store_vN(
-            p["O"],
-            b.add(o_row, d0),
-            pack_f32_to(b, out, dtype=cfg.dtype),
-            EPT,
-            align=EPT * 2,
-        )
+        _store(g, [b.fmul(acc_loop.results[k], inv_l) for k in range(EPT)])
 
     b.ret()
     return b.kernel
@@ -735,7 +875,7 @@ def build_paged_decode_splitk_reduce(
 
 
 def paged_decode_segment_grid(cfg: PagedDecodeCfg, batch: int) -> Tuple[int, int, int]:
-    return (batch, cfg.num_kv_heads, cfg.num_splits)
+    return (batch, cfg.num_kv_heads * cfg.head_groups, cfg.num_splits)
 
 
 def paged_decode_reduce_grid(cfg: PagedDecodeCfg, batch: int) -> Tuple[int, int, int]:

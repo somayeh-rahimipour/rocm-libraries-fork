@@ -464,6 +464,80 @@ class TestLaneRemap(unittest.TestCase):
                 )
 
 
+class TuningKnobs(unittest.TestCase):
+    """``unroll`` / ``heads_per_cta`` / ``waves_per_eu`` / ``reduce_unroll``.
+
+    Every knob must leave the default config's kernels byte-for-byte alone and
+    keep the single-wave, LDS-free, two-readfirstlane shape when enabled.
+    """
+
+    def test_defaults_keep_kernel_names(self):
+        n = _cfg().kernel_name("seg")
+        for tok in ("_U", "_HC", "_WE"):
+            self.assertNotIn(tok, n)
+        self.assertNotIn("_RU", _cfg().kernel_name("reduce"))
+
+    def test_names_carry_non_default_knobs(self):
+        cfg = _cfg(unroll=4, heads_per_cta=2, waves_per_eu=4, reduce_unroll=1)
+        seg, red = cfg.kernel_name("seg"), cfg.kernel_name("reduce")
+        for tok in ("_U4", "_HC2", "_WE4"):
+            self.assertIn(tok, seg)
+        self.assertIn("_RU", red)
+
+    def test_validation(self):
+        bad = (
+            dict(unroll=3),
+            dict(unroll=16),
+            dict(heads_per_cta=3),  # does not divide the GQA ratio of 4
+            dict(heads_per_cta=8),
+            dict(waves_per_eu=17),
+            dict(reduce_unroll=2),
+            dict(reduce_unroll=1, num_splits=128),
+        )
+        for kw in bad:
+            with self.subTest(**kw):
+                self.assertFalse(is_valid_spec(_cfg(**kw))[0])
+        for kw in (dict(unroll=8), dict(heads_per_cta=1), dict(heads_per_cta=2),
+                   dict(waves_per_eu=2), dict(reduce_unroll=1)):
+            with self.subTest(**kw):
+                self.assertTrue(is_valid_spec(_cfg(**kw))[0])
+
+    def test_head_groups_widen_the_grid(self):
+        base = paged_decode_segment_grid(_cfg(num_splits=8), 2)
+        grp = paged_decode_segment_grid(_cfg(num_splits=8, heads_per_cta=1), 2)
+        self.assertEqual(base, (2, _HK, 8))
+        self.assertEqual(grp, (2, _HK * (_HQ // _HK), 8))
+
+    def test_unrolled_and_grouped_stay_single_wave_no_lds(self):
+        for kw in (dict(unroll=2), dict(unroll=8), dict(heads_per_cta=1),
+                   dict(heads_per_cta=2, unroll=4), dict(waves_per_eu=4)):
+            with self.subTest(**kw):
+                ll = _seg(_cfg(**kw))
+                self.assertEqual(_dup_locals(ll), [])
+                self.assertNotIn("addrspace(3)", ll)
+                self.assertNotIn("s.barrier", ll)
+
+    def test_unroll_adds_one_table_read_per_block(self):
+        for u in (2, 4, 8):
+            with self.subTest(unroll=u):
+                ll = _seg(_cfg(unroll=u))
+                self.assertEqual(_calls(ll, "llvm.amdgcn.readfirstlane.i32"), 1 + u)
+
+    def test_waves_per_eu_emits_attribute(self):
+        self.assertIn("amdgpu-waves-per-eu", _seg(_cfg(waves_per_eu=4)))
+        self.assertNotIn("amdgpu-waves-per-eu", _seg(_cfg()))
+
+    def test_reduce_unroll_is_straight_line(self):
+        for ns in (1, 8, 32):
+            with self.subTest(splits=ns):
+                loop = _red(_cfg(num_splits=ns))
+                flat = _red(_cfg(num_splits=ns, reduce_unroll=1))
+                self.assertEqual(_dup_locals(flat), [])
+                if ns > 1:
+                    self.assertIn("phi ", loop)
+                self.assertNotIn("phi ", flat)
+
+
 def _prod(shape):
     out = 1
     for s in shape:
