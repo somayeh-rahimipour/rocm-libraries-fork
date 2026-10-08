@@ -908,7 +908,7 @@ unified pool — it has PPID 1 and comm `VLLM::EngineCor`, so it does *not* matc
 
 | Document | What it covers |
 |---|---|
-| [`case_study_singlewave_fmha.md`](case_study_singlewave_fmha.md) | The earlier single-wave WMMA campaign and the ~11 TF plateau it reached — historical record, superseded by the swapqk rewrite |
+| [`ALGORITHM.md`](ALGORITHM.md) | The math, from the definition of attention through the online-softmax recurrence to the transposed-QK rewrite the production kernel uses |
 
 ---
 

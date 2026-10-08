@@ -19,7 +19,7 @@ negative results stay attached to the code they describe rather than living only
 in a design doc. See ``ALGORITHM.md`` / ``README.md``.
 
 This is the structural change the register-transpose investigation pointed at. The
-gather winner (``fmha_multiwave``) computes ``S = Q*K^T`` (query on the accumulator
+earlier gather campaign computed ``S = Q*K^T`` (query on the accumulator
 slots, kv on the lane), which forces (a) a cross-lane 16-lane butterfly softmax and
 (b) an LDS round-trip P-transpose every K-tile (the fixed WMMA ``a_map`` needs a full
 16-lane gather that ``permlanex16`` cannot do -- the documented ``p_xpose="shuffle"``

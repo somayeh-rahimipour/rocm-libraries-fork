@@ -1,8 +1,10 @@
 # The winning kernel, from the math up
 
-A step-by-step derivation of the algorithm the **single-wave WMMA flash-attention
-forward** kernel (`fmha_singlewave.py`, and its software-pipelined sibling
-`fmha_pipelined.py`) actually computes — the campaign winner at ~11 TF on gfx1151.
+A step-by-step derivation of the algorithm the gfx1151 **single-wave WMMA
+flash-attention forward** kernels compute. It starts from the untransposed
+$S = Q K^\top$ formulation that the campaign's ~11 TF winner used, and ends in
+section 9 at the transposed-QK rewrite that ships today,
+[`kernels/gfx1151/wmma_fmha_swapqk.py`](../../../kernels/gfx1151/wmma_fmha_swapqk.py).
 
 This is written for a reader with a math / CS background who has **not** seen
 flash attention before. We start from the definition of attention, derive the
@@ -434,11 +436,11 @@ matrix unit.
 - [`README.md`](./README.md) — the optimization case study: why single-wave gather
   wins, why every LDS-staging rewrite loses, the roofline, and the iteration
   ledger.
-- `fmha_singlewave.py` — the kernel this document describes (D128 winner). Each step
-  above maps to a labelled section in `build_wmma_fmha_singlewave`.
-- `fmha_pipelined.py` — the same algorithm with the QK of tile $t+1$ hoisted to
-  overlap with the softmax of tile $t$ (software pipelining); the D64 winner. The
-  *math* is identical — only the *order* of the independent operations changes.
+- [`kernels/gfx1151/wmma_fmha_swapqk.py`](../../../kernels/gfx1151/wmma_fmha_swapqk.py)
+  — the production kernel, built by `build_wmma_fmha_swapqk`. Sections 1–8 derive the
+  recurrence it evaluates; section 9 derives the transpose that makes it fast.
+- [`kernels/gfx1151/wmma_fmha_fwd.py`](../../../kernels/gfx1151/wmma_fmha_fwd.py)
+  — the untransposed $S = Q K^\top$ kernel sections 1–8 describe directly.
 
 ---
 
