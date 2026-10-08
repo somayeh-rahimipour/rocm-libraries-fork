@@ -8,6 +8,7 @@ against a float32 torch reference (``torch.nn.grad.conv2d_input``).  Covers:
   - stride=1 (direct-store epilogue, no atomics)
   - stride=2 (tilde-decomposition, atomic epilogue)
   - split_k > 1 (atomic epilogue)
+  - pointwise 1x1/stride1/pad0 (flat-offset fast path, no tilde decomposition)
   - bf16 and fp32 data types
   - gfx1151 / gfx1201 via WMMA candidates
   - gfx1250 via WMMA wavelet pipeline (stride=1 mem + stride>1 / split_k wavelet)
@@ -210,6 +211,55 @@ class TestConvDgradCorrectness(unittest.TestCase):
             "--split-k",
             "1",
             label="fp32 stride=1",
+        )
+
+    # ---- pointwise 1x1 (flat-offset fast path) -------------------------------
+
+    def test_fp16_pointwise_1x1(self):
+        """fp16 dgrad, 1x1/stride1/pad0 ungrouped — the flat-offset fast path.
+
+        dy_descriptor/w_descriptor take a separate branch when
+        ``p.is_pointwise and not grouped``: the tilde decomposition is skipped
+        and the offsets collapse to ``m_sub*K + k_sub`` and ``k_sub*C + c_val``.
+        The emitter parity config only byte-compares the Python and C++
+        emitters, so a shared wrong offset would pass there; this is the
+        reference-based check, and the offset arithmetic is what it pins down.
+
+        N*Ho*Wo == 98 and gemm_k == K == 48 are each short of the widest
+        candidate tile, so the last M and K tiles are partial and the tail lanes
+        do take the branch.  What that deliberately does NOT buy is coverage of
+        the branch's validity predicate: on a pointwise shape the offset is a
+        flat index, so an out-of-range m_sub lands past the end of dY and an
+        out-of-range k_sub lands past the end of W, and the descriptor's OOB
+        clamp (see the dg_K_padded note in conv_implicit_gemm_dgrad) has already
+        zeroed those lanes.  Deleting either clause leaves this test green.  Do
+        not widen the dims hoping to change that — the redundancy is structural,
+        not a property of these particular numbers.
+        """
+        self._verify(
+            "--dtype",
+            "fp16",
+            "--N",
+            "2",
+            "--Hi",
+            "7",
+            "--Wi",
+            "7",
+            "--C",
+            "64",
+            "--K",
+            "48",
+            "--Y",
+            "1",
+            "--X",
+            "1",
+            "--pH",
+            "0",
+            "--pW",
+            "0",
+            "--split-k",
+            "1",
+            label="fp16 pointwise 1x1",
         )
 
     # ---- stride=2 (tilde decomposition, atomic epilogue) ---------------------
@@ -534,11 +584,11 @@ class TestConvDgradGfx1250Emit(unittest.TestCase):
     def _lower_gfx1250_kouter(self, dtype: str) -> str:
         """Lower a K-outer (transpose-read) gfx1250 dgrad kernel, CPU-only."""
         from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
-        from rocke.instances.common._conv_implicit_gemm_common import (
+        from kernels.common._conv_implicit_gemm_common import (
             ConvDataSpec,
             ConvProblem,
         )
-        from rocke.instances.common.conv_implicit_gemm_dgrad import (
+        from kernels.common.conv_implicit_gemm_dgrad import (
             DgradConvSpec,
             build_implicit_gemm_conv_dgrad,
             is_valid_dgrad_spec,
@@ -579,11 +629,11 @@ class TestConvDgradGfx1250Emit(unittest.TestCase):
         """
         import dataclasses
 
-        from rocke.instances.common._conv_implicit_gemm_common import (
+        from kernels.common._conv_implicit_gemm_common import (
             ConvDataSpec,
             ConvProblem,
         )
-        from rocke.instances.common.conv_implicit_gemm_dgrad import (
+        from kernels.common.conv_implicit_gemm_dgrad import (
             DgradConvSpec,
             is_valid_dgrad_spec,
         )
@@ -736,7 +786,8 @@ def _dgrad_run_inprocess(spec, dtype, seed=0):
     import torch
 
     from rocke import compile_kernel
-    from rocke.helpers.manifest import conv_args_signature
+    from kernels.common.conv_args import ConvArgs
+    from kernels.common.conv_abi import conv_args_signature
     from kernels.common.conv_implicit_gemm_dgrad import (
         build_implicit_gemm_conv_dgrad,
         pack_sub_gemm_buffer,
@@ -769,24 +820,24 @@ def _dgrad_run_inprocess(spec, dtype, seed=0):
     sg_d = rt.alloc(ctypes.sizeof(raw))
     rt.memcpy_h2d(sg_d, raw, ctypes.sizeof(raw))
 
-    sig = conv_args_signature(dtype) + [
-        {"name": "sub_gemm_buf", "type": "ptr<i32, global>", "size_bytes": 8},
-        {"name": "num_sub_gemms", "type": "i32", "size_bytes": 4},
-    ]
+    # The tilde record buffer is part of the dgrad ABI, not an extension.
+    sig = conv_args_signature(dtype, direction="dgrad")
     launcher = KernelLauncher(
         hsaco=artifact.hsaco, kernel_name=artifact.kernel_name, signature=sig
     )
     launcher(
-        {
-            "A": dY_d,
-            "B": W_d,
-            "D": dX_d,
-            "A_bytes": dY.nbytes,
-            "B_bytes": W.nbytes,
-            "D_bytes": dX.nbytes,
-            "sub_gemm_buf": sg_d,
-            "num_sub_gemms": len(sub_gemms),
-        },
+        ConvArgs.from_problem(
+            p, direction="dgrad", tile_m=spec.tile_m, tile_n=spec.tile_n
+        ).to_launch_values(
+            int(dY_d),
+            int(W_d),
+            int(dX_d),
+            dY.nbytes,
+            W.nbytes,
+            dX.nbytes,
+            sub_gemm_buf=int(sg_d),
+            num_sub_gemms=len(sub_gemms),
+        ),
         config=LaunchConfig(
             grid=(sub_gemms[-1].block_end, p.groups, spec.split_k),
             block=(spec.launch_block_size, 1, 1),
