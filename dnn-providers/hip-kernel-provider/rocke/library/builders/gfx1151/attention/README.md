@@ -152,6 +152,31 @@ a 64-wide tile, so a 2080-token request silently attended to only 2048 keys. Bot
 vLLM gate and the in-repo torch op now share the same picker and reject anything
 non-divisible.
 
+### 2.6 The rocKE dispatcher, which is a separate door
+
+Everything above is the **vLLM** path. rocKE has its own dispatcher
+(`rocke/library/dispatch/attention/`), and until recently it had no gfx1151 entry
+at all — the kernel was reachable only through the verify scripts in this
+directory. It is now registered as `attention_gfx1151_swapqk`, which declares its
+coverage as data: fp16 only, `hdim_q % 32 == 0` (dual-gather pairs adjacent
+d-subtiles), `seqlen_q % q_rows_per_cta == 0` (the grid helper refuses a partial
+tile) and the `seqlen_k % block_n == 0` constraint from §2.5 above.
+
+Registration makes the kernel **reachable, not default**. gfx1151 prefill still
+routes to `attention_unified_2d` unless a caller names
+`algorithm="wmma_fmha_swapqk"` or `spec_id="gfx1151_swapqk"` — the same opt-in
+shape the gfx950 dense and gfx1250 WMMA candidates use. Flipping the default would
+swap a benchmarked path for an unbenchmarked one across the whole shape space on
+the strength of a registration; that is a separate, measured decision.
+
+One caller contract comes with it: `select_spec` hands back the kernel's own
+`SwapQKCfg`, whose `v_transposed` default makes V a `[B, Hk, D, Sk]` tensor rather
+than `[B, Sk, Hk, D]`. The dispatcher does not relayout tensors, so callers relay
+through `swapqk_transpose_v`; the torch binding shape-checks V so a row-major
+tensor fails loudly instead of returning plausible garbage (see
+[§9.1](#91-v_transposed--false--remove-the-permute-the-obvious-way) for why
+`v_transposed=False` is not the answer).
+
 ---
 
 ## 3. Prefill: isolated kernel results
@@ -904,11 +929,33 @@ unified pool — it has PPID 1 and comm `VLLM::EngineCor`, so it does *not* matc
 
 ---
 
-## 11. Document index
+## 11. Directory index
 
 | Document | What it covers |
 |---|---|
 | [`ALGORITHM.md`](ALGORITHM.md) | The math, from the definition of attention through the online-softmax recurrence to the transposed-QK rewrite the production kernel uses |
+
+Everything else here builds, binds, verifies or times one of the two shipping
+kernels. Nothing in this directory *is* a kernel — the kernels live in
+[`rocke/library/kernels/gfx1151/`](../../../kernels/gfx1151/).
+
+| Script | Role |
+|---|---|
+| [`gfx1151_dense_attention_builder.py`](gfx1151_dense_attention_builder.py) | The build/bind surface the dispatcher imports. `rocke/library/dispatch/attention/gfx1151.py` registers `attention_gfx1151_swapqk` through it |
+| [`wmma_fmha_swapqk_verify.py`](wmma_fmha_swapqk_verify.py) | Correctness + TFLOP/s gate for the shipping prefill kernel, dense and paged-V ([§12](#12-reproducing)) |
+| [`paged_decode_splitk_verify.py`](paged_decode_splitk_verify.py) | Correctness + GB/s gate for the decode kernel ([§12](#12-reproducing)) |
+| [`e2e_combined_bench.py`](e2e_combined_bench.py) | **The** benchmark: one `--ctx-sweep` reproduces §4.1, §6 and §7 through the vLLM v1 path |
+| [`wmma_fmha_fwd_verify.py`](wmma_fmha_fwd_verify.py) | Correctness gate for `wmma_fmha_fwd`, the untransposed $S = QK^\top$ kernel that swapqk was rewritten from ([`ALGORITHM.md`](ALGORITHM.md) §9) |
+| [`wmma_fmha_fwd_bench.py`](wmma_fmha_fwd_bench.py) | Kernel-level timing for the same, driven as a subprocess by the sweep below |
+| [`wmma_fmha_fwd_sweep_profile.py`](wmma_fmha_fwd_sweep_profile.py) | `wmma_fmha_fwd` knob sweep; pinned by `library/tests/test_wmma_fmha_fwd_sweep_profile.py` |
+
+The A/B scaffolding the optimization campaign ran on — five superseded kernel
+variants and seven tuning drivers — was deleted once the campaign closed. What
+it found is recorded in [§8](#8-optimizations-that-worked) and
+[§9](#9-optimizations-that-were-expected-to-help-and-did-not); the winners are
+defaults on the shipping specs. Reconstructing a driver from the sections above
+is cheaper than carrying dead sweep code that no longer compiles against the
+current spec fields.
 
 ---
 

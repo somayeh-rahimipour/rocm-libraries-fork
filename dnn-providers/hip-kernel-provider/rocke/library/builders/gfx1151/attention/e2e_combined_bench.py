@@ -62,8 +62,20 @@ never reached a kernel still produces a plausible number -- the incumbent
 measured twice. Hence every measurement asserts on the backend's own dispatch
 counters and is discarded if the kernel did not actually run.
 
+This is **the** benchmark entry point for the gfx1151 attention work. One
+invocation produces every published e2e number::
+
+    python -m builders.gfx1151.attention.e2e_combined_bench --ctx-sweep
+
+It takes ~95 minutes, so run it detached. Drop ``--ctx-sweep`` for the four
+named workloads instead of the B=1 context ladder. Kernel-level (not e2e)
+timing lives in the two verify scripts beside this one, which report TFLOP/s
+for prefill and GB/s for decode.
+
 Requires a vLLM source checkout on ``PYTHONPATH`` exporting the
-``ROCKE_GFX1151`` attention backend; see the README's "Reproducing" section.
+``ROCKE_GFX1151`` attention backend; see the README's "Reproducing" section
+for the full environment, and run ``rocm-smi --showpids`` first -- an orphaned
+process holding the KV allocation will kill the run at startup.
 """
 
 from __future__ import annotations
